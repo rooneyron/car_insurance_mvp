@@ -1,4 +1,5 @@
 langchain
+langchain-openai
 langgraph
 openai
 faiss-cpu
@@ -7,3 +8,4 @@ gradio
 python-dotenv
 fastapi
 uvicorn
+sentence-transformers

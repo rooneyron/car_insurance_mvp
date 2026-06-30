@@ -1,25 +1,20 @@
 """
 三个 Chain 的初始化 + Memory 挂载
-
-- General Chain：不带工具，纯对话（成本最低）
-- Sale Chain：报价/售前（带工具：算保费、查条款）
-- Service Chain：理赔/售后（带工具：查保单、查条款、转人工）
-
-所有 Chain 共用同一个 MemorySaver（基于 session_id）
-
-【MCP 迁移准备】
-每个工具都拆分为两层：
-  - _logic 函数：纯业务逻辑，与 LangChain 解耦，将来 MCP 直接复用
-  - @tool 装饰器：当前 LangChain 包装，薄薄一层调用 _logic
 """
 
+import os
+import sys
+# 将项目根目录加入 Python 路径
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 现在可以正常导入
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.tools import tool
 from typing import Optional
-import os
 import json
+
 
 # ---------- 全局 Memory（所有 Chain 共用） ----------
 shared_memory = MemorySaver()
@@ -104,23 +99,31 @@ def query_policy_logic(policy_id: str, id_card: str) -> str:
 
 def search_insurance_terms_logic(query: str) -> str:
     """
-    RAG 检索条款核心逻辑（Mock 版，后续替换为真实 FAISS）
+    RAG 检索条款核心逻辑（真实 FAISS + Cross-Encoder Rerank）
     参数：搜索关键词
     返回：匹配的条款内容
     """
-    # TODO: 后续替换为真实的 FAISS 检索
-    # 当前为 Mock 实现，先让流程跑通
-    mock_terms = {
-        "车损险": "车损险保障被保险车辆因碰撞、倾覆、火灾、爆炸、自然灾害等造成的损失。",
-        "第三方责任险": "第三方责任险保障因被保险车辆造成第三方人身伤亡或财产损失的赔偿责任。",
-        "交强险": "交强险是国家强制购买的保险，保障交通事故中第三方受害人的人身伤亡和财产损失。",
-        "玻璃险": "玻璃险保障车辆挡风玻璃和车窗玻璃因单独破碎造成的损失。",
-        "驾乘险": "驾乘险保障被保险车辆上驾驶员和乘客在交通事故中的人身伤害。",
-    }
-    for key, value in mock_terms.items():
-        if key in query or query in key:
-            return f"📄 条款查询结果：{key}\n{value}"
-    return f"📄 未找到与「{query}」直接匹配的条款，建议咨询人工客服获取详细信息。"
+    try:
+        # 直接使用绝对导入，不依赖 sys.path
+        import importlib.util
+        import os
+        
+        # 动态加载 rag 模块
+        rag_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "rag.py")
+        spec = importlib.util.spec_from_file_location("rag", rag_path)
+        rag = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rag)
+        
+        results = rag.search_terms(query, top_k=2)
+        if not results or results == ["未找到相关内容"]:
+            return f"📄 未找到与「{query}」直接匹配的条款，建议咨询人工客服获取详细信息。"
+
+        output = f"📄 关于「{query}」的相关条款（已智能排序）：\n\n"
+        for i, result in enumerate(results, 1):
+            output += f"--- 结果 {i} ---\n{result}\n\n"
+        return output
+    except Exception as e:
+        return f"❌ 检索失败: {str(e)}"
 
 
 def transfer_to_human_logic(reason: str) -> str:
