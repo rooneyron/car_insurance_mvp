@@ -1,0 +1,21 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# 环境变量（如果有）
+.env
+
+# 操作系统
+.DS_Store
+Thumbs.db
