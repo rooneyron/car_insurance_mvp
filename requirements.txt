@@ -1,0 +1,9 @@
+langchain
+langgraph
+openai
+faiss-cpu
+numpy
+gradio
+python-dotenv
+fastapi
+uvicorn
