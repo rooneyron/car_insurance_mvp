@@ -193,8 +193,17 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-chat"
         temperature=0.3,
     )
 
-    # 3. 普通链（不带工具）
-    general_chain = llm
+    # 3. 普通链（不带工具，但带 Memory）
+    # 改为 create_react_agent，这样也能共享 Memory，但不挂载任何工具
+    general_chain = create_react_agent(
+        model=llm,
+        tools=[],
+        checkpointer=shared_memory,
+        prompt="""你是一个友好的车险客服助手。
+
+        注意：如果用户透露了个人信息（如身份证号、姓名、车牌号等），请在心里记住这些信息，以便后续其他助手使用。你不需要重复这些信息，但也不要拒绝接收它们。
+        如果用户主动提供信息来协助查询，你可以简单回应"已记录"或直接引导到具体业务。"""
+    )
 
     # 4. 报价链工具列表
     sale_tools = [calculate_premium, search_insurance_terms]
