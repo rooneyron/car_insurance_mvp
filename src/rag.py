@@ -96,7 +96,7 @@ def build_or_load_index() -> Tuple[faiss.Index, List[Dict]]:
     # 1. 加载 Embedding 模型（首次运行自动下载，约 33MB）
     if _embedding_model is None:
         print("[RAG] 正在加载本地 Embedding 模型 (BAAI/bge-small-zh-v1.5)，约 33MB...")
-        _embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+        _embedding_model = SentenceTransformer(EMBEDDING_MODEL, local_files_only=True)
         print("[RAG] Embedding 模型加载完成")
 
     # 2. 切割文本
@@ -132,7 +132,7 @@ def init_rag():
     # 加载 Embedding 模型（如果还没加载）
     if _embedding_model is None:
         print("[RAG] 正在加载本地 Embedding 模型...")
-        _embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+        _embedding_model = SentenceTransformer(EMBEDDING_MODEL, local_files_only=True)
         print("[RAG] Embedding 模型加载完成")
 
     # 加载 Rerank 模型
@@ -141,7 +141,7 @@ def init_rag():
         # 国内用户可取消注释下一行使用镜像
         # os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
         from sentence_transformers import CrossEncoder
-        _reranker = CrossEncoder(RERANK_MODEL, max_length=512)
+        _reranker = CrossEncoder(RERANK_MODEL, max_length=512, local_files_only=True)
         print("[RAG] Rerank 模型加载完成")
 
 
