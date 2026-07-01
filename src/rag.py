@@ -152,12 +152,14 @@ def search_terms(query: str, top_k: int = 3) -> List[str]:
     1. FAISS 粗排（召回 Top-10）
     2. Cross-Encoder 精排（输出 Top-K）
     """
+    import time
     global _index, _chunks, _embedding_model, _reranker
 
     if _index is None or not _chunks:
         init_rag()
 
     # Step A: FAISS 粗排
+    start_faiss = time.time()
     query_vec = _embedding_model.encode([query], normalize_embeddings=True)
     query_vec = np.array(query_vec).astype('float32')
 
@@ -168,13 +170,19 @@ def search_terms(query: str, top_k: int = 3) -> List[str]:
     for idx in indices[0]:
         if idx >= 0 and idx < len(_chunks):
             candidates.append(_chunks[idx]["full_text"])
+    
+    elapsed_faiss = (time.time() - start_faiss) * 1000
+    print(f"[RAG计时] FAISS 检索: {elapsed_faiss:.0f}ms, 召回 {len(candidates)} 个候选")
 
     if not candidates:
         return ["未找到相关内容"]
 
     # Step B: Cross-Encoder 精排
+    start_rerank = time.time()
     pairs = [[query, cand] for cand in candidates]
     scores = _reranker.predict(pairs)
+    elapsed_rerank = (time.time() - start_rerank) * 1000
+    print(f"[RAG计时] Rerank 推理: {elapsed_rerank:.0f}ms (对 {len(candidates)} 个候选)")
 
     sorted_results = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
     final_results = [item[0] for item in sorted_results[:top_k]]

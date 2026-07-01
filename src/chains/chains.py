@@ -15,6 +15,8 @@ from langchain_core.tools import tool
 from typing import Optional
 import json
 
+# ---------- 正常导入 RAG，复用预加载的模型 ----------
+from src.rag import search_terms
 
 # ---------- 全局 Memory（所有 Chain 共用） ----------
 shared_memory = MemorySaver()
@@ -103,24 +105,24 @@ def search_insurance_terms_logic(query: str) -> str:
     参数：搜索关键词
     返回：匹配的条款内容
     """
+    import time
+    start_total = time.time()
+    
     try:
-        # 直接使用绝对导入，不依赖 sys.path
-        import importlib.util
-        import os
+        start_search = time.time()
+        results = search_terms(query, top_k=2)
+        elapsed_search = (time.time() - start_search) * 1000
+        print(f"[RAG计时] search_terms 总耗时: {elapsed_search:.0f}ms")
         
-        # 动态加载 rag 模块
-        rag_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "rag.py")
-        spec = importlib.util.spec_from_file_location("rag", rag_path)
-        rag = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(rag)
-        
-        results = rag.search_terms(query, top_k=2)
         if not results or results == ["未找到相关内容"]:
             return f"📄 未找到与「{query}」直接匹配的条款，建议咨询人工客服获取详细信息。"
 
         output = f"📄 关于「{query}」的相关条款（已智能排序）：\n\n"
         for i, result in enumerate(results, 1):
             output += f"--- 结果 {i} ---\n{result}\n\n"
+        
+        elapsed_total = (time.time() - start_total) * 1000
+        print(f"[RAG计时] search_insurance_terms_logic 总耗时: {elapsed_total:.0f}ms")
         return output
     except Exception as e:
         return f"❌ 检索失败: {str(e)}"
@@ -168,7 +170,7 @@ def transfer_to_human(reason: str) -> str:
 # 3. 初始化三个 Chain
 # ============================================================
 
-def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-chat"):
+def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-flash"):
     """
     初始化三个 Chain，并返回它们和共享 Memory
 
@@ -194,15 +196,14 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-chat"
     )
 
     # 3. 普通链（不带工具，但带 Memory）
-    # 改为 create_react_agent，这样也能共享 Memory，但不挂载任何工具
     general_chain = create_react_agent(
         model=llm,
         tools=[],
         checkpointer=shared_memory,
         prompt="""你是一个友好的车险客服助手。
 
-        注意：如果用户透露了个人信息（如身份证号、姓名、车牌号等），请在心里记住这些信息，以便后续其他助手使用。你不需要重复这些信息，但也不要拒绝接收它们。
-        如果用户主动提供信息来协助查询，你可以简单回应"已记录"或直接引导到具体业务。"""
+注意：如果用户透露了个人信息（如身份证号、姓名、车牌号等），请在心里记住这些信息，以便后续其他助手使用。你不需要重复这些信息，但也不要拒绝接收它们。
+如果用户主动提供信息来协助查询，你可以简单回应"已记录"或直接引导到具体业务。"""
     )
 
     # 4. 报价链工具列表
@@ -216,14 +217,25 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-chat"
         model=llm,
         tools=sale_tools,
         checkpointer=shared_memory,
-        prompt="你是一个车险售前助手，帮助用户计算保费、推荐投保方案。请友好、专业地回答。"
+        prompt="""你是一个车险售前助手，帮助用户计算保费、推荐投保方案。
+
+重要规则：
+1. 如果用户没有提供车型、年龄、驾龄，请检查对话历史中是否曾经提供过这些信息，如果有则直接使用。
+2. 只有对话历史中也没有这些信息时，才向用户询问。
+3. 请友好、专业地回答。"""
     )
 
     agent_service = create_react_agent(
         model=llm,
         tools=service_tools,
         checkpointer=shared_memory,
-        prompt="你是一个车险售后助手，帮助用户查询保单、解释理赔条款、处理投诉。必要时可转人工。"
+        prompt="""你是一个车险售后助手，帮助用户查询保单、解释理赔条款、处理投诉。
+
+重要规则：
+1. 当用户查询保单时，如果用户没有提供身份证号，请检查对话历史中是否曾经提供过，如果有则直接使用。
+2. 如果对话历史中也没有身份证号，再向用户询问。
+3. 不要重复索要用户已经提供过的信息。
+4. 必要时可转人工。"""
     )
 
     return general_chain, agent_sale, agent_service, shared_memory
