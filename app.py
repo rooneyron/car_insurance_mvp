@@ -13,6 +13,8 @@ from fastapi.responses import JSONResponse
 import uvicorn
 import gradio as gr
 from dotenv import load_dotenv
+from src.route_types import Route, ROUTE_LABELS   # 或者 from src.route_types
+
 
 load_dotenv()
 
@@ -201,49 +203,48 @@ def chat_api(session_id: str, message: str) -> dict:
 # Gradio 界面
 # ============================================================
 def create_gradio_interface():
-    def chat_response(message, history, session_id):
-        print(f"[Gradio] 用户输入: {message}", flush=True)
-        result = chat_api(session_id, message)
-        if result["success"] != 0:
-            return f"❌ 系统异常: {result.get('error_msg', '未知错误')}", session_id
-        
-        route = result.get("route", "unknown")
-        route_label = {
-            "general": "💬 闲聊",
-            "sale": "💰 报价链",
-            "service": "🛠️ 理赔链"
-        }.get(route, f"🔀 {route}")
-        
-        elapsed_ms = result.get("elapsed_ms", 0)
-        elapsed_str = f"⏱️ {elapsed_ms/1000:.1f}s" if elapsed_ms > 0 else ""
-        
-        reply = result["content"]["reply"]
-        if result["content"].get("transfer", False):
-            ticket_id = result["content"].get("ticket_id", "")
-            reply += f"\n\n🔄 已为您转接人工客服，工单号：{ticket_id}"
-        
-        return f"<small>{route_label}  {elapsed_str}</small>\n\n{reply}", session_id
-
     with gr.Blocks(title="车险智能客服 MVP") as demo:
         gr.Markdown("# 🚗 车险智能客服 MVP")
         gr.Markdown("基于路由决策 + LangChain 构建")
-        
+
         # 用 State 保存 session_id
         session_state = gr.State(value=f"gradio_{int(time.time())}")
-        # 不用 type 参数，Gradio 6.x 默认接受字典列表
         chatbot = gr.Chatbot(label="对话窗口")
         msg = gr.Textbox(label="输入消息", placeholder="请输入你的问题...")
         clear = gr.Button("清空对话")
-        
+
+        # 核心响应函数：先显示状态，再显示回复
         def respond(message, chat_history, session_id):
             if not message:
                 return "", chat_history, session_id
-            bot_message, session_id = chat_response(message, chat_history, session_id)
-            # 直接传字典列表，Gradio 6.x 原生支持
+
+            # 第一步：立即显示"正在理解问题..."
             chat_history.append({"role": "user", "content": message})
-            chat_history.append({"role": "assistant", "content": bot_message})
-            return "", chat_history, session_id
-        
+            chat_history.append({"role": "assistant", "content": "🤔 正在理解问题..."})
+            yield "", chat_history, session_id
+
+            # 第二步：调用 chat_api，获取结果
+            result = chat_api(session_id, message)
+
+            # 第三步：更新为最终回复
+            if result["success"] != 0:
+                final_reply = f"❌ 系统异常: {result.get('error_msg', '未知错误')}"
+            else:
+                route = result.get("route", "unknown")
+                route_label = ROUTE_LABELS.get(route, f"🔀 {route}")
+                elapsed_ms = result.get("elapsed_ms", 0)
+                elapsed_str = f"⏱️ {elapsed_ms/1000:.1f}s" if elapsed_ms > 0 else ""
+                final_reply = result["content"]["reply"]
+                if result["content"].get("transfer", False):
+                    ticket_id = result["content"].get("ticket_id", "")
+                    final_reply += f"\n\n🔄 已为您转接人工客服，工单号：{ticket_id}"
+                # 加上路由标签和耗时
+                final_reply = f"<small>{route_label}  {elapsed_str}</small>\n\n{final_reply}"
+
+            # 替换最后一条 assistant 消息
+            chat_history[-1] = {"role": "assistant", "content": final_reply}
+            yield "", chat_history, session_id
+
         msg.submit(respond, [msg, chatbot, session_state], [msg, chatbot, session_state])
         clear.click(
             lambda: (None, [], f"gradio_{int(time.time())}"),
@@ -251,7 +252,7 @@ def create_gradio_interface():
             [chatbot, session_state],
             queue=False
         )
-    
+
     return demo
 
 

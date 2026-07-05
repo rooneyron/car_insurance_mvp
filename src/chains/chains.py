@@ -112,7 +112,6 @@ def search_insurance_terms_logic(query: str) -> str:
         start_search = time.time()
         results = search_terms(query, top_k=2)
         elapsed_search = (time.time() - start_search) * 1000
-        print(f"[RAG计时] search_terms 总耗时: {elapsed_search:.0f}ms")
         
         if not results or results == ["未找到相关内容"]:
             return f"📄 未找到与「{query}」直接匹配的条款，建议咨询人工客服获取详细信息。"
@@ -122,7 +121,6 @@ def search_insurance_terms_logic(query: str) -> str:
             output += f"--- 结果 {i} ---\n{result}\n\n"
         
         elapsed_total = (time.time() - start_total) * 1000
-        print(f"[RAG计时] search_insurance_terms_logic 总耗时: {elapsed_total:.0f}ms")
         return output
     except Exception as e:
         return f"❌ 检索失败: {str(e)}"
@@ -203,7 +201,8 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-fl
         prompt="""你是一个友好的车险客服助手。
 
 注意：如果用户透露了个人信息（如身份证号、姓名、车牌号等），请在心里记住这些信息，以便后续其他助手使用。你不需要重复这些信息，但也不要拒绝接收它们。
-如果用户主动提供信息来协助查询，你可以简单回应"已记录"或直接引导到具体业务。"""
+如果用户主动提供信息来协助查询，你可以简单回应"已记录"或直接引导到具体业务。""",
+        debug=True
     )
 
     # 4. 报价链工具列表

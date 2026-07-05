@@ -29,3 +29,6 @@ keywords:
   # 如需强制优先级，可单独配置 force_service 列表
   # force_service:
   #   - "事故"
+  force_service:   # 这部分是独立的
+    - "事故"
+    - "紧急"
