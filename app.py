@@ -130,7 +130,7 @@ def chat_api(session_id: str, message: str) -> dict:
     try:
         timer.start("Agent 调用")
         
-        if route == "general":
+        if route == Route.GENERAL:
             result = general_chain.invoke(
                 {"messages": [{"role": "user", "content": message}]},
                 config=config
@@ -139,7 +139,7 @@ def chat_api(session_id: str, message: str) -> dict:
             reply = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
             transfer_flag = False
         
-        elif route == "sale":
+        elif route == Route.SALE:
             result = agent_sale.invoke(
                 {"messages": [{"role": "user", "content": message}]},
                 config=config
@@ -148,7 +148,7 @@ def chat_api(session_id: str, message: str) -> dict:
             reply = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
             transfer_flag = check_transfer_flag(result)
         
-        elif route == "service":
+        elif route == Route.SERVICE:
             result = agent_service.invoke(
                 {"messages": [{"role": "user", "content": message}]},
                 config=config
