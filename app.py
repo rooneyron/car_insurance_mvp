@@ -13,12 +13,18 @@ from fastapi.responses import JSONResponse
 import uvicorn
 import gradio as gr
 from dotenv import load_dotenv
-from src.route_types import Route, ROUTE_LABELS   # 或者 from src.route_types
-
+from src.route_types import Route, ROUTE_LABELS
+from src.error_types import ErrorCode, USER_ERROR_MESSAGES,DEFAULT_ERROR_MESSAGE
+from langgraph.errors import GraphRecursionError
 
 load_dotenv()
 
 app = FastAPI(title="车险智能客服 MVP", version="0.1.0")
+
+# ---------- 全局变量（预加载时初始化） ----------
+_general_chain = None
+_agent_sale = None
+_agent_service = None
 
 
 # ============================================================
@@ -87,28 +93,26 @@ async def root():
 # ============================================================
 def chat_api(session_id: str, message: str) -> dict:
     from src.core.routing import decide_route
-    from src.chains.chains import init_chains
-    from src.rag import init_rag
+
+    # ---------- 输入长度校验 ----------
+    if len(message) > 1000:
+        return {
+            "success": -1,
+            "error_msg": USER_ERROR_MESSAGES.get(ErrorCode.INPUT_TOO_LONG, DEFAULT_ERROR_MESSAGE),
+            "content": {}
+        }
 
     timer = Timer()
     timer.start("总耗时")
     
     print(f"[DEBUG] 收到消息: {message[:30]}...", flush=True)
     
-    timer.start("初始化 Chain")
-    general_chain, agent_sale, agent_service, memory = init_chains()
-    timer.stop("初始化 Chain")
-    
-    timer.start("初始化 RAG")
-    init_rag()
-    timer.stop("初始化 RAG")
-    
     timer.start("路由决策")
     route = decide_route(session_id, message)
     timer.stop("路由决策")
     print(f"[路由决策] session={session_id}, message={message[:20]}..., route={route}", flush=True)
     
-    config = {"configurable": {"thread_id": session_id}}
+    config = {"configurable": {"thread_id": session_id}, "recursion_limit": 5}
     
     def check_transfer_flag(result_dict):
         messages = result_dict.get("messages", [])
@@ -127,11 +131,12 @@ def chat_api(session_id: str, message: str) -> dict:
                         return True
         return False
 
+    # ---------- 统一异常捕获 ----------
     try:
         timer.start("Agent 调用")
         
         if route == Route.GENERAL:
-            result = general_chain.invoke(
+            result = _general_chain.invoke(
                 {"messages": [{"role": "user", "content": message}]},
                 config=config
             )
@@ -140,16 +145,30 @@ def chat_api(session_id: str, message: str) -> dict:
             transfer_flag = False
         
         elif route == Route.SALE:
-            result = agent_sale.invoke(
+            result = _agent_sale.invoke(
                 {"messages": [{"role": "user", "content": message}]},
                 config=config
             )
             last_msg = result["messages"][-1]
             reply = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
             transfer_flag = check_transfer_flag(result)
+            # ---------- 新增：检查工具终止信号 ----------
+            if reply.startswith("TOOL_FINISHED:"):
+                # 提取干净的消息内容（去掉前缀）
+                clean_reply = reply.replace("TOOL_FINISHED:", "").strip()
+                return {
+                    "success": 0,
+                    "content": {
+                        "reply": clean_reply or "暂未找到相关信息，建议转人工咨询。",
+                        "transfer": False,
+                    },
+                    "route": route,
+                    "elapsed_ms": timer.get_total_ms(),
+                }
+    # ---------------------------------------
         
         elif route == Route.SERVICE:
-            result = agent_service.invoke(
+            result = _agent_service.invoke(
                 {"messages": [{"role": "user", "content": message}]},
                 config=config
             )
@@ -158,7 +177,7 @@ def chat_api(session_id: str, message: str) -> dict:
             transfer_flag = check_transfer_flag(result)
         
         else:
-            return {"success": -1, "error_msg": f"未知路由: {route}", "content": {}}
+            return {"success": -1, "error_msg": DEFAULT_ERROR_MESSAGE, "content": {}}
         
         timer.stop("Agent 调用")
         timer.stop("总耗时")
@@ -192,11 +211,23 @@ def chat_api(session_id: str, message: str) -> dict:
             "elapsed_ms": timer.get_total_ms()
         }
     
+    except GraphRecursionError as e:
+        print(f"[ERROR] GraphRecursionError: {e}", flush=True)
+        return {
+            "success": -1,
+            "error_msg": USER_ERROR_MESSAGES.get(ErrorCode.GRAPH_RECURSION_LIMIT, DEFAULT_ERROR_MESSAGE),
+            "content": {}
+        }
+    
     except Exception as e:
         print(f"[ERROR] chat_api 异常: {e}", flush=True)
         import traceback
         traceback.print_exc()
-        return {"success": -1, "error_msg": str(e), "content": {}}
+        return {
+            "success": -1,
+            "error_msg": USER_ERROR_MESSAGES.get(ErrorCode.UNKNOWN, DEFAULT_ERROR_MESSAGE),
+            "content": {}
+        }
 
 
 # ============================================================
@@ -228,7 +259,7 @@ def create_gradio_interface():
 
             # 第三步：更新为最终回复
             if result["success"] != 0:
-                final_reply = f"❌ 系统异常: {result.get('error_msg', '未知错误')}"
+                final_reply = f"❌ {result.get('error_msg', DEFAULT_ERROR_MESSAGE)}"
             else:
                 route = result.get("route", "unknown")
                 route_label = ROUTE_LABELS.get(route, f"🔀 {route}")
@@ -264,13 +295,20 @@ if __name__ == "__main__":
     print("⏳ 正在预加载模型...")
     from src.chains.chains import init_chains
     from src.rag import init_rag
+
     try:
-        init_chains()
+        # 初始化 Chain，获取三个 Agent 和 Memory
+        _general_chain, _agent_sale, _agent_service, _ = init_chains()
+        # 初始化 RAG（加载 FAISS 索引和模型）
         init_rag()
         print("✅ 预加载完成")
     except Exception as e:
         print(f"⚠️ 预加载失败: {e}")
         print("   服务仍会启动，但第一条消息可能较慢")
+        # 如果预加载失败，设置默认值避免 None 引用错误
+        _general_chain = None
+        _agent_sale = None
+        _agent_service = None
     
     demo = create_gradio_interface()
     app = gr.mount_gradio_app(app, demo, path="/gradio")

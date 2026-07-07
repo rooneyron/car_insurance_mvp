@@ -101,29 +101,25 @@ def query_policy_logic(policy_id: str, id_card: str) -> str:
 
 def search_insurance_terms_logic(query: str) -> str:
     """
-    RAG 检索条款核心逻辑（真实 FAISS + Cross-Encoder Rerank）
-    参数：搜索关键词
-    返回：匹配的条款内容
+    RAG 检索条款核心逻辑
+    当检索成功时返回条款内容，失败时返回降级文本（不抛异常）
     """
-    import time
-    start_total = time.time()
-    
     try:
-        start_search = time.time()
         results = search_terms(query, top_k=2)
-        elapsed_search = (time.time() - start_search) * 1000
         
+        # 如果结果为空或未找到，返回降级文本
         if not results or results == ["未找到相关内容"]:
-            return f"📄 未找到与「{query}」直接匹配的条款，建议咨询人工客服获取详细信息。"
+            return "TOOL_FINISHED: 知识库中无相关信息，请直接告知用户并建议转人工。"
+
 
         output = f"📄 关于「{query}」的相关条款（已智能排序）：\n\n"
         for i, result in enumerate(results, 1):
             output += f"--- 结果 {i} ---\n{result}\n\n"
-        
-        elapsed_total = (time.time() - start_total) * 1000
         return output
-    except Exception as e:
-        return f"❌ 检索失败: {str(e)}"
+
+    except Exception:
+        # 任何异常都返回降级文本，不暴露技术细节
+        return "TOOL_FINISHED: 知识库中无相关信息，请直接告知用户并建议转人工。"
 
 
 def transfer_to_human_logic(reason: str) -> str:
@@ -202,7 +198,6 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-fl
 
 注意：如果用户透露了个人信息（如身份证号、姓名、车牌号等），请在心里记住这些信息，以便后续其他助手使用。你不需要重复这些信息，但也不要拒绝接收它们。
 如果用户主动提供信息来协助查询，你可以简单回应"已记录"或直接引导到具体业务。""",
-        debug=True
     )
 
     # 4. 报价链工具列表
@@ -211,7 +206,7 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-fl
     # 5. 理赔链工具列表
     service_tools = [query_policy, search_insurance_terms, transfer_to_human]
 
-    # 6. 创建 Agent
+    # 6. 创建 Agent（加 recursion_limit 防止死循环）
     agent_sale = create_react_agent(
         model=llm,
         tools=sale_tools,
@@ -221,7 +216,7 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-fl
 重要规则：
 1. 如果用户没有提供车型、年龄、驾龄，请检查对话历史中是否曾经提供过这些信息，如果有则直接使用。
 2. 只有对话历史中也没有这些信息时，才向用户询问。
-3. 请友好、专业地回答。"""
+3. 请友好、专业地回答。""",
     )
 
     agent_service = create_react_agent(
@@ -234,7 +229,7 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-fl
 1. 当用户查询保单时，如果用户没有提供身份证号，请检查对话历史中是否曾经提供过，如果有则直接使用。
 2. 如果对话历史中也没有身份证号，再向用户询问。
 3. 不要重复索要用户已经提供过的信息。
-4. 必要时可转人工。"""
+4. 必要时可转人工。""",
     )
 
     return general_chain, agent_sale, agent_service, shared_memory

@@ -10,6 +10,7 @@ RAG 向量检索模块（纯本地，零外部 API 依赖）
 import os
 import re
 import pickle
+import time
 import numpy as np
 from typing import List, Dict, Tuple
 import faiss
@@ -26,11 +27,33 @@ FAISS_INDEX_PATH = "data/faiss_index.bin"
 CHUNKS_PKL_PATH = "data/chunks.pkl"
 TERMS_FILE_PATH = "data/insurance_terms.txt"
 
+# RAG 检索质量阈值（Rerank 分数低于此值视为无效）
+RAG_SCORE_THRESHOLD = 0.6
+
 # ---------- 全局变量 ----------
 _index = None
 _chunks: List[Dict] = []
 _embedding_model: SentenceTransformer = None
 _reranker = None
+
+
+# ---------- 工具函数 ----------
+def _log_missed_query(query: str, best_score: float = None, faiss_recall: int = None):
+    """
+    记录检索失败或低质量的查询到日志文件
+    参数:
+        query: 用户查询
+        best_score: Rerank 最高分（如果存在）
+        faiss_recall: FAISS 召回数量（0 表示完全未命中）
+    """
+    log_dir = "data"
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, "missed_queries.log")
+    with open(log_path, "a", encoding="utf-8") as f:
+        if faiss_recall == 0:
+            f.write(f"{time.time()} | query: {query} | FAISS_recall: 0 | best_score: N/A\n")
+        else:
+            f.write(f"{time.time()} | query: {query} | best_score: {best_score:.3f}\n")
 
 
 # ---------- 1. 文本切割 ----------
@@ -151,8 +174,8 @@ def search_terms(query: str, top_k: int = 3) -> List[str]:
     双阶段检索：
     1. FAISS 粗排（召回 Top-10）
     2. Cross-Encoder 精排（输出 Top-K）
+    如果精排最高分低于阈值，返回 ["未找到相关内容"]，并记录日志。
     """
-    import time
     global _index, _chunks, _embedding_model, _reranker
 
     if _index is None or not _chunks:
@@ -170,11 +193,13 @@ def search_terms(query: str, top_k: int = 3) -> List[str]:
     for idx in indices[0]:
         if idx >= 0 and idx < len(_chunks):
             candidates.append(_chunks[idx]["full_text"])
-    
+
     elapsed_faiss = (time.time() - start_faiss) * 1000
     print(f"[RAG计时] FAISS 检索: {elapsed_faiss:.0f}ms, 召回 {len(candidates)} 个候选")
 
+    # 如果 FAISS 完全搜不到任何候选
     if not candidates:
+        _log_missed_query(query, faiss_recall=0)
         return ["未找到相关内容"]
 
     # Step B: Cross-Encoder 精排
@@ -185,6 +210,14 @@ def search_terms(query: str, top_k: int = 3) -> List[str]:
     print(f"[RAG计时] Rerank 推理: {elapsed_rerank:.0f}ms (对 {len(candidates)} 个候选)")
 
     sorted_results = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
+
+    # 检查最高分是否低于阈值
+    best_score = sorted_results[0][1]
+    if best_score < RAG_SCORE_THRESHOLD:
+        _log_missed_query(query, best_score=best_score)
+        return ["未找到相关内容"]
+
+    # 质量合格，返回 Top-K
     final_results = [item[0] for item in sorted_results[:top_k]]
     return final_results
 
