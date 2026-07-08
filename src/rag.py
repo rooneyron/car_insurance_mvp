@@ -16,6 +16,7 @@ from typing import List, Dict, Tuple
 import faiss
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
+from src.constants import RAG_EMPTY_RESULT
 
 # ---------- 全局配置 ----------
 # 本地 Embedding 模型（33MB，轻量快速）
@@ -200,7 +201,7 @@ def search_terms(query: str, top_k: int = 3) -> List[str]:
     # 如果 FAISS 完全搜不到任何候选
     if not candidates:
         _log_missed_query(query, faiss_recall=0)
-        return ["未找到相关内容"]
+        return [RAG_EMPTY_RESULT]
 
     # Step B: Cross-Encoder 精排
     start_rerank = time.time()
@@ -215,7 +216,7 @@ def search_terms(query: str, top_k: int = 3) -> List[str]:
     best_score = sorted_results[0][1]
     if best_score < RAG_SCORE_THRESHOLD:
         _log_missed_query(query, best_score=best_score)
-        return ["未找到相关内容"]
+        return [RAG_EMPTY_RESULT]
 
     # 质量合格，返回 Top-K
     final_results = [item[0] for item in sorted_results[:top_k]]

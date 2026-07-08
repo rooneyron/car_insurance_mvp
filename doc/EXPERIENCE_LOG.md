@@ -207,3 +207,73 @@ app.get('/admin/generate-token', (req, res) => {
 
 ### 预期效果
 用户看到状态提示后，能清晰感知系统正在按步骤处理，等待焦虑显著降低。演示时能直观展示系统的“工作过程”，而非面对一个黑盒。
+
+
+
+## 2026-07-09 功能模块优化
+
+### 1. Memory 摘要（上下文压缩）
+
+**背景**：多轮对话后上下文持续膨胀，超过模型窗口限制会导致请求失败或成本上升。
+
+**实现方式**：集成 `langmem.short_term.SummarizationNode`，在每次调用模型前通过 `pre_model_hook` 执行摘要检查。
+
+| 配置项 | 值 | 说明 |
+|--------|-----|------|
+| `max_tokens` | 2000 | 触发摘要的阈值，上下文超过此值生成摘要 |
+| `max_summary_tokens` | 500 | 摘要内容的 token 上限 |
+| `input_messages_key` | "messages" | 读取消息的状态键 |
+| `output_messages_key` | "messages" | 写入摘要的状态键 |
+
+**验证方式**：设置 `max_tokens=100` 测试，发送多轮对话后观察消息数从 5 降到 3，摘要功能生效。
+
+**涉及文件**：`src/chains/chains.py`
+
+
+### 2. Token 访问控制（JWT 链接认证）
+
+**背景**：部署公网后，需要控制谁能访问演示服务，避免被恶意调用。
+
+**实现方式**：
+- 使用 JWT 生成访问 Token，有效期 7 天
+- 在 FastAPI 中间件中验证所有请求（除 `/health`、`/`、静态资源外）
+- 通过 `generate_token.py` 脚本在本地生成 Token
+
+**验证方式**：
+- 不带 Token 访问 `/gradio` → 返回 401 `Missing token`
+- 带有效 Token → 正常加载 Gradio 界面
+
+**涉及文件**：
+- `app.py`（中间件）
+- `generate_token.py`（新建）
+
+
+### 3. Token 消耗统计（每日限额 + JSON 日志）
+
+**背景**：需要控制每日 API 调用成本，避免超出预算；同时记录每次请求的 Token 消耗用于分析。
+
+**实现方式**：
+- 在 `src/token_usage.py` 中管理每日累计 Token 消耗
+- 默认限额：`1,000,000 token/天`，0 点自动重置
+- 数据持久化：`data/usage_cache.json`
+- 每次请求从 `usage_metadata` 提取 Token 数并累加
+- 打印 JSON 格式日志到终端
+- 新增 `/queryToken` 接口查询当日累计用量
+
+| 字段 | 说明 |
+|------|------|
+| `input_tokens` | 本次输入 Token 数 |
+| `output_tokens` | 本次输出 Token 数 |
+| `cached_tokens` | 缓存命中 Token 数 |
+| `total_tokens` | 本次总 Token 数 |
+| `daily_usage` | 当日累计用量 |
+
+**验证方式**：
+- 设置 `DAILY_TOKEN_LIMIT=10` 测试，第二条消息返回“今日 Token 配额已用完”
+- 终端输出 `[Token日志]` JSON
+- `/queryToken` 返回累计数据
+
+**涉及文件**：
+- `src/token_usage.py`（新建）
+- `app.py`（集成统计和限额检查）
+- `data/usage_cache.json`（自动生成）

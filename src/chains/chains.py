@@ -1,40 +1,32 @@
 """
-三个 Chain 的初始化 + Memory 挂载
+三个 Chain 的初始化 + Memory 挂载（带摘要 + 日志）
 """
 
 import os
 import sys
-# 将项目根目录加入 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# 现在可以正常导入
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
+from langmem.short_term import SummarizationNode
 from langchain_core.tools import tool
 from typing import Optional
 import json
+from src.constants import RAG_EMPTY_RESULT, TOOL_FINISHED_PREFIX, TRANSFER_SIGNAL
 
-# ---------- 正常导入 RAG，复用预加载的模型 ----------
 from src.rag import search_terms
-
-# ---------- 全局 Memory（所有 Chain 共用） ----------
-shared_memory = MemorySaver()
 
 
 # ============================================================
 # 1. 工具业务逻辑（纯 Python，与 LangChain 解耦）
-#    将来迁移 MCP 时，直接把这些函数注册为 MCP 工具即可
 # ============================================================
 
 def calculate_premium_logic(car_model: str, driver_age: int, years_driving: int) -> str:
     """
     保费估算核心逻辑
-    参数：车型、驾驶员年龄、驾龄
-    返回：格式化的保费估算结果
     """
-    # 基础保费（根据车型粗略划分）
-    base_premium = 5000  # 默认
+    base_premium = 5000
     if "特斯拉" in car_model or "宝马" in car_model or "奔驰" in car_model:
         base_premium = 8000
     elif "比亚迪" in car_model or "吉利" in car_model or "长城" in car_model:
@@ -42,7 +34,6 @@ def calculate_premium_logic(car_model: str, driver_age: int, years_driving: int)
     elif "五菱" in car_model or "奇瑞" in car_model:
         base_premium = 3500
 
-    # 年龄系数（25-60 岁为最佳，之外系数提高）
     if 25 <= driver_age <= 60:
         age_factor = 1.0
     elif 18 <= driver_age < 25:
@@ -50,7 +41,6 @@ def calculate_premium_logic(car_model: str, driver_age: int, years_driving: int)
     else:
         age_factor = 1.2
 
-    # 驾龄系数（驾龄越长系数越低）
     if years_driving >= 10:
         driving_factor = 0.85
     elif years_driving >= 5:
@@ -74,10 +64,7 @@ def calculate_premium_logic(car_model: str, driver_age: int, years_driving: int)
 def query_policy_logic(policy_id: str, id_card: str) -> str:
     """
     保单查询核心逻辑
-    参数：保单号、身份证号
-    返回：格式化的保单详情或未找到提示
     """
-    # 读取造假数据
     data_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "policies.json")
     with open(data_path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -102,15 +89,11 @@ def query_policy_logic(policy_id: str, id_card: str) -> str:
 def search_insurance_terms_logic(query: str) -> str:
     """
     RAG 检索条款核心逻辑
-    当检索成功时返回条款内容，失败时返回降级文本（不抛异常）
     """
     try:
         results = search_terms(query, top_k=2)
-        
-        # 如果结果为空或未找到，返回降级文本
-        if not results or results == ["未找到相关内容"]:
-            return "TOOL_FINISHED: 知识库中无相关信息，请直接告知用户并建议转人工。"
-
+        if not results or results == [RAG_EMPTY_RESULT]:
+            return f"{TOOL_FINISHED_PREFIX}直接告知用户并建议转人工。"
 
         output = f"📄 关于「{query}」的相关条款（已智能排序）：\n\n"
         for i, result in enumerate(results, 1):
@@ -118,22 +101,18 @@ def search_insurance_terms_logic(query: str) -> str:
         return output
 
     except Exception:
-        # 任何异常都返回降级文本，不暴露技术细节
-        return "TOOL_FINISHED: 知识库中无相关信息，请直接告知用户并建议转人工。"
+        return f"{TOOL_FINISHED_PREFIX}直接告知用户并建议转人工。"
 
 
 def transfer_to_human_logic(reason: str) -> str:
     """
     转人工核心逻辑
-    参数：转人工原因
-    返回：__TRANSFER__ 标志（外层编排拦截此标志）
     """
-    return "__TRANSFER__"
+    return TRANSFER_SIGNAL
 
 
 # ============================================================
-# 2. LangChain 工具包装（薄薄一层，调用上面的 _logic 函数）
-#    将来迁移 MCP 时，只需删除 @tool 包装，直接注册 _logic 函数即可
+# 2. LangChain 工具包装
 # ============================================================
 
 @tool
@@ -161,27 +140,18 @@ def transfer_to_human(reason: str) -> str:
 
 
 # ============================================================
-# 3. 初始化三个 Chain
+# 3. 初始化三个 Chain（带摘要）
 # ============================================================
 
 def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-flash"):
     """
-    初始化三个 Chain，并返回它们和共享 Memory
-
-    参数:
-        api_key: DeepSeek API Key（如果不传，从环境变量 DEEPSEEK_API_KEY 读取）
-        model_name: 模型名称，默认 deepseek-chat
-
-    返回:
-        (general_chain, agent_sale, agent_service, memory)
+    初始化三个 Chain，并返回它们和共享 Memory（带摘要）
     """
-    # 1. 获取 API Key
     if api_key is None:
         api_key = os.environ.get("DEEPSEEK_API_KEY")
         if not api_key:
             raise ValueError("请提供 DeepSeek API Key 或设置环境变量 DEEPSEEK_API_KEY")
 
-    # 2. 创建 LLM 实例（DeepSeek 兼容 OpenAI 接口）
     llm = ChatOpenAI(
         model=model_name,
         api_key=api_key,
@@ -189,28 +159,37 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-fl
         temperature=0.3,
     )
 
-    # 3. 普通链（不带工具，但带 Memory）
+    # ---------- 创建摘要节点 ----------
+    summarization_node = SummarizationNode(
+        max_tokens=2000,          
+        max_summary_tokens=500,
+        model=llm,
+        input_messages_key="messages",
+        output_messages_key="messages",
+    )
+
+    # ---------- 共享 Memory ----------
+    memory = MemorySaver()
+
+    # ---------- 普通链 ----------
     general_chain = create_react_agent(
         model=llm,
         tools=[],
-        checkpointer=shared_memory,
+        checkpointer=memory,
+        pre_model_hook=lambda state: summarization_node.invoke(state),  # 添加预检查钩子
         prompt="""你是一个友好的车险客服助手。
 
 注意：如果用户透露了个人信息（如身份证号、姓名、车牌号等），请在心里记住这些信息，以便后续其他助手使用。你不需要重复这些信息，但也不要拒绝接收它们。
 如果用户主动提供信息来协助查询，你可以简单回应"已记录"或直接引导到具体业务。""",
     )
 
-    # 4. 报价链工具列表
+    # ---------- 报价链 ----------
     sale_tools = [calculate_premium, search_insurance_terms]
-
-    # 5. 理赔链工具列表
-    service_tools = [query_policy, search_insurance_terms, transfer_to_human]
-
-    # 6. 创建 Agent（加 recursion_limit 防止死循环）
     agent_sale = create_react_agent(
         model=llm,
         tools=sale_tools,
-        checkpointer=shared_memory,
+        checkpointer=memory,
+        pre_model_hook=lambda state: summarization_node.invoke(state),
         prompt="""你是一个车险售前助手，帮助用户计算保费、推荐投保方案。
 
 重要规则：
@@ -219,10 +198,13 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-fl
 3. 请友好、专业地回答。""",
     )
 
+    # ---------- 理赔链 ----------
+    service_tools = [query_policy, search_insurance_terms, transfer_to_human]
     agent_service = create_react_agent(
         model=llm,
         tools=service_tools,
-        checkpointer=shared_memory,
+        checkpointer=memory,
+        pre_model_hook=lambda state: summarization_node.invoke(state),
         prompt="""你是一个车险售后助手，帮助用户查询保单、解释理赔条款、处理投诉。
 
 重要规则：
@@ -232,7 +214,7 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-fl
 4. 必要时可转人工。""",
     )
 
-    return general_chain, agent_sale, agent_service, shared_memory
+    return general_chain, agent_sale, agent_service, memory
 
 
 # ============================================================
@@ -251,7 +233,6 @@ if __name__ == "__main__":
         print(f"  - Service Agent 类型: {type(service_agent).__name__}")
         print(f"  - Memory 类型: {type(memory).__name__}")
 
-        # 测试工具逻辑（直接调用 _logic，不经过 LangChain）
         print("\n>>> 测试工具逻辑（纯函数，MCP 就绪）...")
         print("  - calculate_premium_logic:")
         print(f"    {calculate_premium_logic('特斯拉 Model 3', 30, 8)}")
