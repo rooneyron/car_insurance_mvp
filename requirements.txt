@@ -9,3 +9,5 @@ python-dotenv
 fastapi
 uvicorn
 sentence-transformers
+PyJWT
+langmem
