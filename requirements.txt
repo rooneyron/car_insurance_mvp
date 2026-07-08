@@ -11,3 +11,4 @@ uvicorn
 sentence-transformers
 PyJWT
 langmem
+langchain-text-splitters
