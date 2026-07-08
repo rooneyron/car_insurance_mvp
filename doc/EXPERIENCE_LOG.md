@@ -277,3 +277,74 @@ app.get('/admin/generate-token', (req, res) => {
 - `src/token_usage.py`（新建）
 - `app.py`（集成统计和限额检查）
 - `data/usage_cache.json`（自动生成）
+
+
+## 2026-07-09 生产环境 Rerank 模型优化
+
+### 背景
+部署到 Render 等云平台时，免费实例内存约 512MB-1GB，无法加载 1.1GB 的本地 Rerank 模型（BAAI/bge-reranker-base），导致启动失败或服务被强制停止。
+
+### 解决方案
+通过环境变量 `USE_LOCAL_RERANK` 控制是否加载本地 Rerank 模型：
+
+| 环境 | `USE_LOCAL_RERANK` | 启动加载 | RAG 模式 |
+|------|---------------------|----------|----------|
+| 本地开发 | `true` | Embedding + Rerank（1.1GB） | FAISS + 本地 Rerank |
+| 生产环境 | `false` | **仅 Embedding（33MB）** | FAISS + LLM 重排 |
+
+### 代码改动
+
+**1. `src/rag.py` - `init_rag()` 函数**
+
+```python
+# 加载 Rerank 模型前检查环境变量
+use_local_rerank = os.environ.get("USE_LOCAL_RERANK", "true").lower() == "true"
+if not use_local_rerank:
+    print("[RAG] 生产环境：跳过加载本地 Rerank 模型（1.1GB）")
+    return
+2. src/chains/chains.py - search_insurance_terms_logic() 函数
+
+python
+use_local_rerank = os.environ.get("USE_LOCAL_RERANK", "true").lower() == "true"
+
+if use_local_rerank:
+    # 本地模式：FAISS + Rerank
+    results = search_terms(query, top_k=2)
+else:
+    # 生产模式：FAISS 召回 + LLM 重排
+    candidates = retrieve_candidates(query, top_k=10)
+    # 调用 DeepSeek Chat API 进行重排
+    llm = ChatOpenAI(...)
+    response = llm.invoke(prompt)
+3. 新增 retrieve_candidates() 函数
+在 src/rag.py 中新增函数，仅执行 FAISS 检索，不加载 Rerank 模型。
+
+验证结果
+启动日志：
+
+text
+⏳ 正在预加载模型...
+[RAG] 检测到本地索引文件，正在加载...
+[RAG] 加载成功，共 16 个块
+[RAG] 正在加载本地 Embedding 模型...
+[RAG] Embedding 模型加载完成
+[RAG] 生产环境：跳过加载本地 Rerank 模型（1.1GB）
+✅ 启动时未加载 1.1GB Rerank 模型
+
+✅ 对话正常使用 LLM 重排
+
+✅ 功能完整，无报错
+
+环境变量配置
+本地 .env：
+
+text
+USE_LOCAL_RERANK=true
+生产环境（Render/Railway）：
+
+text
+USE_LOCAL_RERANK=false
+涉及文件
+src/rag.py
+
+src/chains/chains.py

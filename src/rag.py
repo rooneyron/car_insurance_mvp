@@ -148,6 +148,10 @@ def build_or_load_index() -> Tuple[faiss.Index, List[Dict]]:
 
 # ---------- 3. 初始化 ----------
 def init_rag():
+    """
+    初始化 RAG 系统。
+    根据 USE_LOCAL_RERANK 环境变量决定是否加载 1.1GB Rerank 模型。
+    """
     global _index, _chunks, _embedding_model, _reranker
 
     # 加载/构建向量库
@@ -159,7 +163,13 @@ def init_rag():
         _embedding_model = SentenceTransformer(EMBEDDING_MODEL, local_files_only=True)
         print("[RAG] Embedding 模型加载完成")
 
-    # 加载 Rerank 模型
+    # ---------- 检查是否跳过 Rerank ----------
+    use_local_rerank = os.environ.get("USE_LOCAL_RERANK", "true").lower() == "true"
+    if not use_local_rerank:
+        print("[RAG] 生产环境：跳过加载本地 Rerank 模型（1.1GB）")
+        return  # 直接返回，不加载 Rerank
+
+    # 加载 Rerank 模型（仅在本地开发时加载）
     if _reranker is None:
         print("[RAG] 正在加载本地 Rerank 模型 (BAAI/bge-reranker-base)，约 1.1GB...")
         # 国内用户可取消注释下一行使用镜像
@@ -221,6 +231,31 @@ def search_terms(query: str, top_k: int = 3) -> List[str]:
     # 质量合格，返回 Top-K
     final_results = [item[0] for item in sorted_results[:top_k]]
     return final_results
+
+
+def retrieve_candidates(query: str, top_k: int = 10) -> List[str]:
+    """
+    仅执行 FAISS 检索，不进行 Rerank。
+    用于生产环境，配合 LLM 做重排。
+    """
+    global _index, _chunks, _embedding_model
+
+    if _index is None or not _chunks:
+        init_rag()
+
+    # 向量化查询
+    query_vec = _embedding_model.encode([query], normalize_embeddings=True)
+    query_vec = np.array(query_vec).astype('float32')
+
+    retrieve_k = min(top_k, len(_chunks))
+    distances, indices = _index.search(query_vec, retrieve_k)
+
+    candidates = []
+    for idx in indices[0]:
+        if idx >= 0 and idx < len(_chunks):
+            candidates.append(_chunks[idx]["full_text"])
+
+    return candidates
 
 
 # ---------- 5. 测试代码 ----------

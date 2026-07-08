@@ -15,7 +15,8 @@ from typing import Optional
 import json
 from src.constants import RAG_EMPTY_RESULT, TOOL_FINISHED_PREFIX, TRANSFER_SIGNAL
 
-from src.rag import search_terms
+# 根据环境变量决定是否使用本地 Rerank
+from src.rag import search_terms, retrieve_candidates
 
 
 # ============================================================
@@ -88,19 +89,61 @@ def query_policy_logic(policy_id: str, id_card: str) -> str:
 
 def search_insurance_terms_logic(query: str) -> str:
     """
-    RAG 检索条款核心逻辑
+    RAG 检索条款核心逻辑。
+    根据环境变量 USE_LOCAL_RERANK 决定使用本地 Rerank 还是 LLM 重排。
     """
+    # 读取环境变量，默认为 true（本地开发）
+    use_local_rerank = os.environ.get("USE_LOCAL_RERANK", "true").lower() == "true"
+
     try:
-        results = search_terms(query, top_k=2)
-        if not results or results == [RAG_EMPTY_RESULT]:
-            return f"{TOOL_FINISHED_PREFIX}直接告知用户并建议转人工。"
+        if use_local_rerank:
+            # ====== 本地模式：FAISS + Rerank ======
+            results = search_terms(query, top_k=2)
+            if not results or results == [RAG_EMPTY_RESULT]:
+                return f"{TOOL_FINISHED_PREFIX}直接告知用户并建议转人工。"
 
-        output = f"📄 关于「{query}」的相关条款（已智能排序）：\n\n"
-        for i, result in enumerate(results, 1):
-            output += f"--- 结果 {i} ---\n{result}\n\n"
-        return output
+            output = f"📄 关于「{query}」的相关条款（已智能排序）：\n\n"
+            for i, result in enumerate(results, 1):
+                output += f"--- 结果 {i} ---\n{result}\n\n"
+            return output
 
-    except Exception:
+        else:
+            # ====== 生产模式：FAISS 召回 + LLM 重排 ======
+            # 1. FAISS 召回 Top-10
+            candidates = retrieve_candidates(query, top_k=10)
+            if not candidates:
+                return f"{TOOL_FINISHED_PREFIX}直接告知用户并建议转人工。"
+
+            # 2. 构造 Prompt 让 LLM 选择最相关的 2 条
+            prompt = f"""你是一个保险条款检索助手。用户的问题是："{query}"
+
+请从以下候选条款中，选出最相关的 2 条，并按相关性从高到低排序。
+只返回选中的条款原文，用 --- 分隔。
+
+候选条款：
+{chr(10).join([f'[{i+1}] {c}' for i, c in enumerate(candidates)])}
+"""
+            # 3. 调用 DeepSeek Chat API
+            llm = ChatOpenAI(
+                model=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+                api_key=os.environ.get("DEEPSEEK_API_KEY"),
+                base_url="https://api.deepseek.com/v1",
+                temperature=0,
+            )
+            response = llm.invoke(prompt)
+            # 4. 解析返回结果
+            selected = [r.strip() for r in response.content.split('---') if r.strip()]
+            # 如果没有解析到任何内容，回退到前两条
+            if not selected:
+                selected = candidates[:2]
+
+            output = f"📄 关于「{query}」的相关条款（已智能排序）：\n\n"
+            for i, result in enumerate(selected, 1):
+                output += f"--- 结果 {i} ---\n{result}\n\n"
+            return output
+
+    except Exception as e:
+        # 任何异常都返回降级文本
         return f"{TOOL_FINISHED_PREFIX}直接告知用户并建议转人工。"
 
 
@@ -176,7 +219,7 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-fl
         model=llm,
         tools=[],
         checkpointer=memory,
-        pre_model_hook=lambda state: summarization_node.invoke(state),  # 添加预检查钩子
+        pre_model_hook=lambda state: summarization_node.invoke(state),
         prompt="""你是一个友好的车险客服助手。
 
 注意：如果用户透露了个人信息（如身份证号、姓名、车牌号等），请在心里记住这些信息，以便后续其他助手使用。你不需要重复这些信息，但也不要拒绝接收它们。
