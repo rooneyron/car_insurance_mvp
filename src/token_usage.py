@@ -13,7 +13,9 @@ USAGE_FILE = "data/usage_cache.json"
 # 每日 Token 上限（输入 + 输出）
 # 基于真实账单数据：日均约 2 万 token，1,000,000 token 约为 50 倍冗余
 # 测试时可临时改为 100 验证拦截逻辑
-DAILY_TOKEN_LIMIT = 100000
+DAILY_TOKEN_LIMIT = int(os.environ.get("DAILY_TOKEN_LIMIT", 1_000_000))
+
+
 
 def _load_usage() -> Dict[str, Any]:
     """加载今日使用量"""
