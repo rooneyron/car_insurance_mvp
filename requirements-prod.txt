@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+gradio
+python-dotenv
+PyJWT
+langchain
+langchain-openai
+langgraph
+openai
+faiss-cpu
+numpy
+langchain-text-splitters
+langmem
+fastembed
+# 注意：没有 sentence-transformers，生产环境不会加载 Rerank

@@ -15,7 +15,6 @@ import numpy as np
 from typing import List, Dict, Tuple
 import faiss
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from sentence_transformers import SentenceTransformer
 from src.constants import RAG_EMPTY_RESULT
 
 # ---------- 全局配置 ----------
@@ -34,7 +33,7 @@ RAG_SCORE_THRESHOLD = 0.6
 # ---------- 全局变量 ----------
 _index = None
 _chunks: List[Dict] = []
-_embedding_model: SentenceTransformer = None
+_embedding_model = None   # 将使用 fastembed.TextEmbedding
 _reranker = None
 
 
@@ -117,10 +116,11 @@ def build_or_load_index() -> Tuple[faiss.Index, List[Dict]]:
 
     print("[RAG] 未找到本地索引，开始构建...")
 
-    # 1. 加载 Embedding 模型（首次运行自动下载，约 33MB）
+    # 1. 加载 Embedding 模型（使用 fastembed，轻量级）
     if _embedding_model is None:
-        print("[RAG] 正在加载本地 Embedding 模型 (BAAI/bge-small-zh-v1.5)，约 33MB...")
-        _embedding_model = SentenceTransformer(EMBEDDING_MODEL, local_files_only=True)
+        print("[RAG] 正在加载轻量级 Embedding 模型 (fastembed/bge-small-zh-v1.5)...")
+        from fastembed import TextEmbedding
+        _embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL)
         print("[RAG] Embedding 模型加载完成")
 
     # 2. 切割文本
@@ -128,8 +128,9 @@ def build_or_load_index() -> Tuple[faiss.Index, List[Dict]]:
     _chunks = chunks
     texts = [c["full_text"] for c in chunks]
 
-    # 3. 向量化（本地，不调用任何 API）
-    vectors = _embedding_model.encode(texts, normalize_embeddings=True)
+    # 3. 向量化（fastembed 返回生成器，需转为列表）
+    vectors_generator = _embedding_model.embed(texts)
+    vectors = list(vectors_generator)  # 每个向量是 numpy 数组
     vector_array = np.array(vectors).astype('float32')
 
     # 4. 构建 FAISS
@@ -159,8 +160,9 @@ def init_rag():
 
     # 加载 Embedding 模型（如果还没加载）
     if _embedding_model is None:
-        print("[RAG] 正在加载本地 Embedding 模型...")
-        _embedding_model = SentenceTransformer(EMBEDDING_MODEL, local_files_only=True)
+        print("[RAG] 正在加载轻量级 Embedding 模型...")
+        from fastembed import TextEmbedding
+        _embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL)
         print("[RAG] Embedding 模型加载完成")
 
     # ---------- 检查是否跳过 Rerank ----------
@@ -169,11 +171,10 @@ def init_rag():
         print("[RAG] 生产环境：跳过加载本地 Rerank 模型（1.1GB）")
         return  # 直接返回，不加载 Rerank
 
-    # 加载 Rerank 模型（仅在本地开发时加载）
+    # 加载 Rerank 模型（仅在本地开发时加载，延迟导入 sentence_transformers）
     if _reranker is None:
         print("[RAG] 正在加载本地 Rerank 模型 (BAAI/bge-reranker-base)，约 1.1GB...")
-        # 国内用户可取消注释下一行使用镜像
-        # os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+        # 延迟导入，避免生产环境安装 sentence_transformers
         from sentence_transformers import CrossEncoder
         _reranker = CrossEncoder(RERANK_MODEL, max_length=512, local_files_only=True)
         print("[RAG] Rerank 模型加载完成")
@@ -194,8 +195,9 @@ def search_terms(query: str, top_k: int = 3) -> List[str]:
 
     # Step A: FAISS 粗排
     start_faiss = time.time()
-    query_vec = _embedding_model.encode([query], normalize_embeddings=True)
-    query_vec = np.array(query_vec).astype('float32')
+    # fastembed 的 embed 返回生成器，取第一个
+    query_embedding = list(_embedding_model.embed([query]))[0]
+    query_vec = np.array([query_embedding]).astype('float32')
 
     retrieve_k = min(10, len(_chunks))
     distances, indices = _index.search(query_vec, retrieve_k)
@@ -244,8 +246,8 @@ def retrieve_candidates(query: str, top_k: int = 10) -> List[str]:
         init_rag()
 
     # 向量化查询
-    query_vec = _embedding_model.encode([query], normalize_embeddings=True)
-    query_vec = np.array(query_vec).astype('float32')
+    query_embedding = list(_embedding_model.embed([query]))[0]
+    query_vec = np.array([query_embedding]).astype('float32')
 
     retrieve_k = min(top_k, len(_chunks))
     distances, indices = _index.search(query_vec, retrieve_k)
