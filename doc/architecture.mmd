@@ -1,0 +1,53 @@
+graph TB
+    subgraph 用户层
+        A["Gradio 前端<br/>src/gradio_ui.py"]
+        B["REST API<br/>POST /chat · src/api.py"]
+    end
+
+    subgraph 对话调度层
+        C["chat_api<br/>src/chat.py<br/>输入校验 · Token限额 · 转人工处理"]
+    end
+
+    subgraph LangGraph StateGraph
+        D["route_node<br/>src/core/routing.py<br/>关键词匹配 → 意图继承 → LLM兜底"]
+        E["general_node<br/>闲聊/信息收集"]
+        F["sale_node<br/>售前 Agent"]
+        G["service_node<br/>售后 Agent"]
+    end
+
+    subgraph 工具层
+        H["calculate_premium<br/>保费估算"]
+        I["query_policy<br/>保单查询"]
+        J["search_insurance_terms<br/>条款检索 RAG"]
+        K["transfer_to_human<br/>转人工"]
+    end
+
+    subgraph RAG 检索层
+        L["FAISS 向量召回"]
+        M["BGE-Reranker 本地重排<br/>或 LLM 重排 · 生产环境"]
+    end
+
+    subgraph 基础设施
+        N["DeepSeek API<br/>LLM 推理"]
+        O["MemorySaver<br/>对话记忆 + SummarizationNode"]
+    end
+
+    A --> C
+    B --> C
+    C -->|"state.graph.invoke"| D
+    D -->|general| E
+    D -->|sale| F
+    D -->|service| G
+    F --> H
+    F --> J
+    G --> I
+    G --> J
+    G --> K
+    J --> L
+    L --> M
+    E --> N
+    F --> N
+    G --> N
+    E -.-> O
+    F -.-> O
+    G -.-> O
