@@ -13,3 +13,8 @@ PyJWT
 langmem
 langchain-text-splitters
 sentence-transformers   # 本地开发需要 Rerank
+
+# RAGAS 评估（仅开发/测试环境）
+ragas
+datasets
+langchain-community
