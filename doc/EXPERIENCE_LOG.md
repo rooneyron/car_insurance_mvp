@@ -1,350 +1,364 @@
-# 车险智能客服 MVP - 经验与决策日志
+# 车险智能客服 MVP \- 经验与决策日志
 
-> 本文档记录开发过程中遇到的关键问题、权衡过程及最终决策，用于复盘和知识沉淀。
+本文档记录开发过程中遇到的关键问题、权衡过程及最终决策，用于复盘和知识沉淀。
 
 ---
 
 ## 记录一：RAG 部署策略决策
 
+**日期**：2026\-07\-01
+
 ### 背景
 
 在 MVP 开发过程中，我们实现了一套完整的本地 RAG 系统，包含：
-- 文本切割（RecursiveCharacterTextSplitter）
-- 本地 Embedding（BAAI/bge-small-zh-v1.5，33MB）
-- FAISS 向量索引持久化
-- 本地 Cross-Encoder 精排（BAAI/bge-reranker-base，1.1GB）
 
-本地开发测试运行良好，检索和精排效果均达到预期。但在规划公网部署时，发现 1.1GB 的 Rerank 模型会成为瓶颈。
+- 文本切割（RecursiveCharacterTextSplitter）
+
+- 本地 Embedding（BAAI/bge\-small\-zh\-v1\.5，33MB）
+
+- FAISS 向量索引持久化
+
+- 本地 Cross\-Encoder 精排（BAAI/bge\-reranker\-base，1\.1GB）
+
+本地开发测试运行良好，检索和精排效果均达到预期。但在规划公网部署时，发现 1\.1GB 的 Rerank 模型会成为部署瓶颈。
 
 ### 遇到的问题
 
-1. **资源限制**：Render、Railway 等平台的免费层内存通常在 512MB ~ 1GB 之间，无法加载 1.1GB 的 Rerank 模型。
-2. **成本考量**：若继续使用本地 Rerank，必须升级到高内存实例（约 $25-50/月）或 GPU 实例（约 $100+/月），与 MVP“轻量验证”的定位不符。
-3. **效果与成本的两难**：Rerank 确实提升了检索质量，但其带来的价值在当前阶段难以量化，是否值得为 MVP 付出额外成本？
+1. **资源限制**：Render、Railway 等平台的免费层内存通常在 512MB \~ 1GB 之间，无法加载 1\.1GB 的 Rerank 模型。
+
+2. **成本考量**：若继续使用本地 Rerank，必须升级到高内存实例（约 $25\-50/月）或 GPU 实例（约 $100\+/月），与 MVP「轻量验证」的核心定位不符。
+
+3. **效果与成本的两难**：Rerank 可有效提升检索质量，但在 MVP 验证阶段，其增量价值难以量化，投入性价比低。
 
 ### 决策过程
 
-**问题重构**：将“如何部署 1.1GB 的 Rerank 模型？”重新定义为“如何在 MVP 阶段以最低成本验证 RAG+重排逻辑的价值？”
-
-**评估维度**：
-- 目标对齐：MVP 核心是验证产品逻辑，而非验证某个模型的线上性能。
-- 资源约束：线上部署应尽可能利用免费资源。
-- 风险控制：本地开发质量不能下降。
-- 可扩展性：未来切换回高性能方案应零成本。
+**问题重构**：将「如何部署 1\.1GB 的 Rerank 模型？」重新定义为「如何在 MVP 阶段以最低成本验证 RAG\+重排逻辑的价值？」
 
 **备选方案**：
-1. 放弃 Rerank，直接使用 FAISS 检索结果。
-2. 使用商业 Rerank API（如 Cohere），但需额外注册和预存费用。
-3. 使用 LLM（DeepSeek Chat）进行重排，复用已有 API。
+
+1. 放弃 Rerank，直接使用 FAISS 检索结果
+
+2. 使用商业 Rerank API（如 Cohere），需额外注册账号、预存费用，增加项目依赖
+
+3. 复用现有 DeepSeek Chat API，通过 LLM 实现轻量重排，零额外依赖
 
 ### 最终决策
 
-**采用策略模式，根据环境切换重排实现：**
+**采用策略模式，根据运行环境动态切换重排实现**，兼顾开发精度与部署轻量化：
 
-| 环境 | 重排策略 | 原因 |
-|------|---------|------|
-| 本地开发 | Cross-Encoder (1.1GB 模型) | 保证调试精度，无成本压力 |
-| 线上部署 | LLM (DeepSeek Chat) 重排 | 复用现有 API，零额外配置，轻量部署 |
+|运行环境|重排策略|决策原因|
+|---|---|---|
+|本地开发|Cross\-Encoder \(1\.1GB 模型\)|保障调试检索精度，本地设备无内存成本压力|
+|线上部署|LLM \(DeepSeek Chat\) 重排|复用已有 API，零额外配置、零增量成本，适配轻量部署场景|
 
-**实现方式**：通过环境变量 `USE_LOCAL_RERANK` 控制。
-
-**决策理由**：
-1. 保留了本地开发质量。
-2. 线上部署完全不受模型大小限制，可继续使用免费层。
-3. 未来若要切回本地 Rerank 或接入商业 API，只需修改配置，无需重构。
-4. MVP 阶段的核心目标是验证逻辑，而非比拼精度。
+**实现方式**：通过环境变量 `USE_LOCAL_RERANK` 控制重排模式切换。
 
 ### 经验教训
 
-1. **做 MVP 的关键能力是“取舍”**：不是所有好功能都要在这个阶段上线。把预算和精力花在验证核心假设上。
-2. **环境隔离要提前考虑**：开发环境和生产环境的需求不同，从第一天起就为它们设计不同的实现路径。
-3. **大模型不是唯一答案**：1.1GB 的模型效果虽好，但用 200 字的 Prompt + LLM 也能达到 80% 的效果。MVP 要的是“够用”，不是“完美”。
+1. **MVP 核心是取舍**：无需在验证阶段堆砌所有优质功能，聚焦核心业务假设验证，合理分配开发与预算资源。
+
+2. **提前做环境隔离设计**：开发环境与生产环境的资源、性能、成本需求差异极大，项目初期需预留双环境适配方案。
+
+3. **轻量化替代思维**：重型模型效果最优，但在迭代初期，轻量化 LLM 替代方案可实现 80% 核心效果，大幅降低落地门槛。
 
 ---
 
 ## 记录二：Python 模块导入问题
 
+**日期**：2026\-07\-01
+
 ### 遇到的问题
 
-在 `src/chains/chains.py` 中尝试 `from src.rag import search_terms` 时，始终报错 `ModuleNotFoundError: No module named 'src'`。
+在 `src/chains/chains.py` 中执行导入语句 `from src.rag import search_terms` 时，持续抛出报错：`ModuleNotFoundError: No module named 'src'`。
 
 ### 原因分析
 
-执行 `python src/chains/chains.py` 时，Python 会将 `src/chains/` 作为工作目录的起点，而不是项目根目录。因此 `src` 不在 `sys.path` 中，无法被识别为模块。
+直接执行 `python src/chains/chains.py` 时，Python 会将脚本所在目录 `src/chains/` 认定为工作根目录，项目根目录未加入 `sys.path`，导致无法识别 `src` 顶层模块。
 
 ### 解决方案
 
-采用 `python -m src.chains.chains` 方式运行，Python 会自动将项目根目录加入 `sys.path`。
+统一采用模块方式运行脚本：
 
-同时，在 `chains.py` 顶部加入路径修正：
+```bash
+python -m src.chains.chains
+```
+
+该运行方式会自动将项目根目录加入系统路径，完美解决模块识别问题。
+
+同时在脚本顶部增加主动路径修正，兼容各类运行场景：
 
 ```python
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+```
 
-记录三：DeepSeek Embedding API 不可用
-遇到的问题
-在实现 RAG 时，最初计划使用 DeepSeek 提供的 Embedding API（text-embedding-ada-002），但调用时返回 404 错误。
+### 经验教训
 
-原因分析
-DeepSeek 目前尚未开放公开的 Embedding API 服务。虽然其 Chat API 兼容 OpenAI 格式，但 Embedding 接口并不支持。
-
-解决方案
-转向纯本地 Embedding 方案，使用 BAAI/bge-small-zh-v1.5 模型（33MB），完全离线运行，不再依赖任何外部 API。
-
-经验教训
-在技术选型时，不能仅凭“兼容 OpenAI 格式”就假设所有 API 功能都可用。要仔细核对文档，确认所需的具体功能（特别是 Embedding 这类非核心接口）是否真正支持。
-
-text
+Python 模块导入逻辑依赖 `sys.path`，直接运行脚本与模块化运行的底层逻辑不同。项目开发中统一使用 `-m` 模块方式运行，可彻底规避相对导入、模块识别异常。
 
 ---
 
-## 保存位置说明
+## 记录三：DeepSeek Embedding API 不可用问题
 
-请将上述文件命名为 `EXPERIENCE_LOG.md`，并保存到项目的 `docs/` 目录下，即路径为：
-D:\car_insurance_mvp\docs\EXPERIENCE_LOG.md
+**日期**：2026\-07\-01
 
-text
+### 遇到的问题
 
-如果你还没有 `docs/` 文件夹，可以先用以下命令创建：
+项目初期计划采用 DeepSeek 兼容接口的 Embedding API（text\-embedding\-ada\-002）实现向量生成，调用接口持续返回 404 错误，服务不可用。
 
-```bash
-mkdir docs
+### 原因分析
 
-## 记录四：公网部署安全与成本控制策略
-
-### 背景
-
-MVP 部署到公网后，面临两个现实风险：
-1. **API Key 被刷爆**：API 地址暴露后，任何人都可以调用，可能产生不可控的费用。
-2. **无访问控制**：任何人都能访问服务，与“定向演示”的需求不符。
-
-### 问题分析
-
-- DeepSeek API 按 Token 计费，价格便宜但不等于免费。如果被恶意刷量，单日费用仍可能达到数十元。
-- MVP 的预期使用量极低（仅用于演示和测试），正常情况下日均费用不超过 0.1 元。但缺乏防护等于把风险敞口打开。
+DeepSeek 仅对对话接口兼容 OpenAI 调用格式，**暂未开放公开 Embedding 向量接口**，无法通过 API 调用实现向量化能力。
 
 ### 解决方案
 
-采用 **Token 认证 + 用量限额** 双层防护：
+全面切换为纯本地离线 Embedding 方案，选用轻量模型 `BAAI/bge-small-zh-v1.5`（33MB），完全脱离外部 API 依赖，本地即可完成向量生成与检索。
+
+### 经验教训
+
+技术选型不可仅凭「接口格式兼容」默认全功能适配，需提前核对官方文档，确认所需细分功能的可用性，避免开发中途出现方案推翻、返工问题。
 
 ---
 
-#### 第一层：访问 Token（7天有效期）
+## 记录四：公网部署安全与成本控制策略
 
-**目标**：只有持有有效 Token 的用户才能访问服务。
+**日期**：2026\-07\-01
 
-**实现方式**（JWT + 环境变量）：
+### 背景
 
-1. **生成 Token 的接口**（仅管理员可用）：
-```javascript
-// 部署在服务端，如 /admin/generate-token
-app.get('/admin/generate-token', (req, res) => {
-  const adminKey = req.query.adminKey;
-  
-  // 简单校验，防止他人恶意生成
-  if (adminKey !== process.env.ADMIN_SECRET) {
-    return res.status(403).json({ error: '无权限' });
-  }
-  
-  const token = jwt.sign(
-    { purpose: 'car-insurance-demo' },
-    process.env.ACCESS_TOKEN_SECRET,
-    { expiresIn: '7d' }
-  );
-  
-  res.json({ 
-    link: `https://your-demo-domain.com?token=${token}` 
-  });
-});
+项目公网部署后，暴露两大核心风险：
 
+1. **API 成本失控**：公网接口无访问限制，任意用户均可调用，存在 API Key 被盗刷、费用超额风险。
 
-## 优化记录：响应耗时分析与显示
+2. **服务无权限隔离**：无访问校验机制，不符合项目「定向演示、内部验证」的使用定位。
 
-### 1. 前端增加耗时显示
-在回复前展示总耗时，如 `💰 报价链 ⏱️ 1.4s`。
+### 解决方案
 
-### 2. 后台增加计时日志
-新增 Timer 工具，记录各阶段耗时，输出示例：
+设计 **Token 认证 \+ 每日用量限额** 双层防护机制，兼顾安全与成本管控：
+
+#### 第一层：时效访问 Token 认证
+
+基于 JWT 生成专属访问令牌，通过本地脚本 `generate_token.py` 手动生成，默认有效期 7 天，过期自动失效，杜绝长期无效权限。
+
+#### 第二层：每日 Token 用量限额
+
+通过 `src/token_usage.py` 统一管控接口调用消耗，默认每日 Token 限额 1000000，每日 0 点自动重置，从源头控制调用成本。
+
+---
+
+## 记录五：响应耗时分析与性能优化
+
+**日期**：2026\-07\-02
+
+### 优化内容
+
+#### 1\. 前端体验优化：耗时可视化展示
+
+对话回复中新增链路标签与耗时展示，直观反馈请求状态，示例：`💰 报价链 ⏱️ 1.4s`。
+
+#### 2\. 后台全链路计时日志
+
+封装通用 Timer 工具，精细化统计各模块耗时，日志输出示例：
+
+```text
 总耗时: 1395ms
   ├── 初始化 Chain: 5ms
   ├── 初始化 RAG: 0ms
   ├── 路由决策: 0ms
   ├── Agent 调用: 1395ms
+```
 
-### 3. 耗时原因分析
-- 纯 LLM 调用基准耗时：约 0.9s（DeepSeek API）
-- Agent 完整调用耗时：约 1.4s
-- 本地 Agent 框架 + 工具执行：约 0.5s
+#### 3\. 耗时拆解分析
 
-### 4. 预加载
-应用启动时加载模型，首条消息无需等待模型加载。
+- 纯 DeepSeek LLM 调用基准耗时：约 0\.9s
 
-### 5. 结论
-一次对话约 2 次 LLM 调用，单次约 0.7s，合计 1.4s，耗时合理，无紧急优化必要。
+- Agent 完整链路调用总耗时：约 1\.4s
 
+- 本地框架\+工具执行额外耗时：约 0\.5s
 
+#### 4\. 模型预加载优化
 
-## 用户体验优化：进度感知与状态提示
+服务启动时一次性加载所有模型资源，避免首条请求重复加载、耗时过长的问题。
+
+### 优化结论
+
+单次对话平均触发 2 次 LLM 调用，单轮整体耗时稳定在 1\.4s 左右，性能满足演示与业务验证需求，无紧急深度优化必要。
+
+---
+
+## 记录六：用户体验优化：进度感知与状态提示
+
+**日期**：2026\-07\-02
 
 ### 背景
-当前系统响应时间约 6.5 秒（含 LLM 调用 + RAG 检索），用户提交消息后界面无任何反馈，容易产生“系统卡死”的错觉，影响演示体验。
+
+系统原始响应耗时约 6\.5s（含 LLM 调用\+RAG 检索），用户提交请求后界面无任何反馈，易产生「服务卡死、请求失效」的负面感知，严重影响演示体验。
 
 ### 优化目标
-在不改变实际耗时的情况下，通过进度提示让用户感知到系统正在工作，降低等待焦虑。
+
+不改动底层耗时逻辑，通过状态提示优化用户等待感知，降低焦虑感，提升交互体验。
 
 ### 实现方式
-- 在 Gradio 界面中，用户提交消息后立即显示状态提示：
-  - `"正在理解问题..."`（路由 + 第一次 LLM 调用）
-  - `"🔍 正在查询保险条款..."`（RAG 工具执行）
-  - `"正在生成回答..."`（第二次 LLM 调用生成回复）
-- 最终回复内容采用流式输出，逐字展示，增强实时感。
 
-### 实现方式（技术选型）
-- Gradio 的 `gr.ChatInterface` 配合生成器函数，通过 `yield` 分步更新界面。
-- 在 `chat_api` 中拆分执行阶段，每进入一个阶段就 `yield` 一条状态消息。
+1. 用户提交消息后，立即展示占位状态：`🤔 正在理解问题...`
 
-### 预期效果
-用户看到状态提示后，能清晰感知系统正在按步骤处理，等待焦虑显著降低。演示时能直观展示系统的“工作过程”，而非面对一个黑盒。
+2. 服务响应完成后，自动替换占位提示，输出最终对话结果
 
+3. 回复末尾附带路由类型、请求耗时，实现透明化链路反馈
 
+---
 
-## 2026-07-09 功能模块优化
+## 记录七：核心功能模块迭代优化
 
-### 1. Memory 摘要（上下文压缩）
+**日期**：2026\-07\-09
 
-**背景**：多轮对话后上下文持续膨胀，超过模型窗口限制会导致请求失败或成本上升。
+### 1\. Memory 上下文摘要压缩优化
 
-**实现方式**：集成 `langmem.short_term.SummarizationNode`，在每次调用模型前通过 `pre_model_hook` 执行摘要检查。
+#### 背景
 
-| 配置项 | 值 | 说明 |
-|--------|-----|------|
-| `max_tokens` | 2000 | 触发摘要的阈值，上下文超过此值生成摘要 |
-| `max_summary_tokens` | 500 | 摘要内容的 token 上限 |
-| `input_messages_key` | "messages" | 读取消息的状态键 |
-| `output_messages_key` | "messages" | 写入摘要的状态键 |
+多轮对话场景下，上下文内容持续膨胀，易超出模型上下文窗口限制，引发请求失败、Token 消耗过高问题。
 
-**验证方式**：设置 `max_tokens=100` 测试，发送多轮对话后观察消息数从 5 降到 3，摘要功能生效。
+#### 实现方式
+
+集成 `langmem.short_term.SummarizationNode`，通过 `pre_model_hook` 钩子函数，在每次 LLM 调用前自动检测、压缩上下文。
+
+|配置项|参数值|说明|
+|---|---|---|
+|max\_tokens|2000|触发上下文摘要压缩的 Token 阈值|
+|max\_summary\_tokens|500|压缩后摘要内容的最大 Token 上限|
 
 **涉及文件**：`src/chains/chains.py`
 
+### 2\. JWT 访问权限控制优化
 
-### 2. Token 访问控制（JWT 链接认证）
+#### 背景
 
-**背景**：部署公网后，需要控制谁能访问演示服务，避免被恶意调用。
+公网部署后无权限校验，任意用户可访问、调用服务，存在恶意刷量、信息泄露风险，无法满足定向演示需求。
 
-**实现方式**：
-- 使用 JWT 生成访问 Token，有效期 7 天
-- 在 FastAPI 中间件中验证所有请求（除 `/health`、`/`、静态资源外）
-- 通过 `generate_token.py` 脚本在本地生成 Token
+#### 实现方式
 
-**验证方式**：
-- 不带 Token 访问 `/gradio` → 返回 401 `Missing token`
-- 带有效 Token → 正常加载 Gradio 界面
+- 基于 JWT 生成访问 Token，固定 7 天有效期，到期自动失效
 
-**涉及文件**：
-- `app.py`（中间件）
-- `generate_token.py`（新建）
+- 在 FastAPI 中间件全局拦截请求，仅放行 `/health`、根路由、静态资源，其余接口必须校验 Token
 
+- 本地通过 `generate_token.py` 脚本手动生成有效令牌，按需分发
 
-### 3. Token 消耗统计（每日限额 + JSON 日志）
+**涉及文件**：`app.py`（中间件校验）、`generate_token.py`（新增脚本）
 
-**背景**：需要控制每日 API 调用成本，避免超出预算；同时记录每次请求的 Token 消耗用于分析。
+### 3\. Token 用量统计与成本管控优化
 
-**实现方式**：
-- 在 `src/token_usage.py` 中管理每日累计 Token 消耗
-- 默认限额：`1,000,000 token/天`，0 点自动重置
-- 数据持久化：`data/usage_cache.json`
-- 每次请求从 `usage_metadata` 提取 Token 数并累加
-- 打印 JSON 格式日志到终端
-- 新增 `/queryToken` 接口查询当日累计用量
+#### 背景
 
-| 字段 | 说明 |
-|------|------|
-| `input_tokens` | 本次输入 Token 数 |
-| `output_tokens` | 本次输出 Token 数 |
-| `cached_tokens` | 缓存命中 Token 数 |
-| `total_tokens` | 本次总 Token 数 |
-| `daily_usage` | 当日累计用量 |
+缺乏调用量统计与限额机制，无法管控每日 API 成本，且无日志留存，不利于问题排查与用量分析。
 
-**验证方式**：
-- 设置 `DAILY_TOKEN_LIMIT=10` 测试，第二条消息返回“今日 Token 配额已用完”
-- 终端输出 `[Token日志]` JSON
-- `/queryToken` 返回累计数据
+#### 实现方式
 
-**涉及文件**：
-- `src/token_usage.py`（新建）
-- `app.py`（集成统计和限额检查）
-- `data/usage_cache.json`（自动生成）
+- 新增 `src/token_usage.py` 统一管理 Token 消耗统计
 
+- 默认日限额 1000000 Token，每日 0 点自动清零重置
 
-## 2026-07-09 生产环境 Rerank 模型优化
+- 持久化存储用量数据至 `data/usage_cache.json`
+
+- 实时提取每次请求的 Token 消耗并累加，终端输出标准化 JSON 日志
+
+- 新增 `/queryToken` 接口，支持实时查询当日累计用量
+
+**涉及文件**：`src/token_usage.py`（新增）、`app.py`
+
+---
+
+## 记录八：生产环境 Rerank 模型适配优化
+
+**日期**：2026\-07\-09
 
 ### 背景
-部署到 Render 等云平台时，免费实例内存约 512MB-1GB，无法加载 1.1GB 的本地 Rerank 模型（BAAI/bge-reranker-base），导致启动失败或服务被强制停止。
+
+Render 免费云实例内存仅 512MB\-1GB，无法加载 1\.1GB 的本地精排模型 `BAAI/bge-reranker-base`，直接导致服务启动失败、部署崩溃。
 
 ### 解决方案
-通过环境变量 `USE_LOCAL_RERANK` 控制是否加载本地 Rerank 模型：
 
-| 环境 | `USE_LOCAL_RERANK` | 启动加载 | RAG 模式 |
-|------|---------------------|----------|----------|
-| 本地开发 | `true` | Embedding + Rerank（1.1GB） | FAISS + 本地 Rerank |
-| 生产环境 | `false` | **仅 Embedding（33MB）** | FAISS + LLM 重排 |
+通过 `USE_LOCAL_RERANK` 环境变量实现双环境差异化适配：
 
-### 代码改动
+|运行环境|USE\_LOCAL\_RERANK|启动加载资源|RAG 检索模式|
+|---|---|---|---|
+|本地开发|true|Embedding \+ 1\.1GB Rerank 模型|FAISS \+ 本地精准重排|
+|生产部署|false|仅 33MB 轻量 Embedding 模型|FAISS \+ LLM 智能重排|
 
-**1. `src/rag.py` - `init_rag()` 函数**
+### 验证结果
 
-```python
-# 加载 Rerank 模型前检查环境变量
-use_local_rerank = os.environ.get("USE_LOCAL_RERANK", "true").lower() == "true"
-if not use_local_rerank:
-    print("[RAG] 生产环境：跳过加载本地 Rerank 模型（1.1GB）")
-    return
-2. src/chains/chains.py - search_insurance_terms_logic() 函数
+- ✅ 生产环境成功规避大体积 Rerank 模型加载，无内存溢出报错
 
-python
-use_local_rerank = os.environ.get("USE_LOCAL_RERANK", "true").lower() == "true"
+- ✅ LLM 重排逻辑正常生效，检索精度满足演示需求
 
-if use_local_rerank:
-    # 本地模式：FAISS + Rerank
-    results = search_terms(query, top_k=2)
-else:
-    # 生产模式：FAISS 召回 + LLM 重排
-    candidates = retrieve_candidates(query, top_k=10)
-    # 调用 DeepSeek Chat API 进行重排
-    llm = ChatOpenAI(...)
-    response = llm.invoke(prompt)
-3. 新增 retrieve_candidates() 函数
-在 src/rag.py 中新增函数，仅执行 FAISS 检索，不加载 Rerank 模型。
+- ✅ 服务启动稳定，核心对话、检索功能完整可用
 
-验证结果
-启动日志：
+**涉及文件**：`src/rag.py`、`src/chains/chains.py`
 
-text
-⏳ 正在预加载模型...
-[RAG] 检测到本地索引文件，正在加载...
-[RAG] 加载成功，共 16 个块
-[RAG] 正在加载本地 Embedding 模型...
-[RAG] Embedding 模型加载完成
-[RAG] 生产环境：跳过加载本地 Rerank 模型（1.1GB）
-✅ 启动时未加载 1.1GB Rerank 模型
+---
 
-✅ 对话正常使用 LLM 重排
+## 记录九：部署内存限制问题与轻量化改造
 
-✅ 功能完整，无报错
+**日期**：2026\-07\-09
 
-环境变量配置
-本地 .env：
+### 问题现象
 
-text
-USE_LOCAL_RERANK=true
-生产环境（Render/Railway）：
+Render 免费 512MB 内存实例部署时，服务启动阶段频繁触发 `Out of memory (used over 512Mi)` 错误，进程反复崩溃重启，服务无法正常上线。
 
-text
-USE_LOCAL_RERANK=false
-涉及文件
-src/rag.py
+### 根本原因
 
-src/chains/chains.py
+原项目基于 `sentence-transformers` 实现 Embedding 加载，该库强依赖 PyTorch、transformers 等重型依赖，即便仅加载 33MB 小型模型，运行内存占用仍高达 500MB\-1GB，叠加 FastAPI、Gradio、LangChain 等组件后，远超平台 512MB 内存上限。
+
+### 解决方案
+
+采用 **FastEmbed** 全面替代 sentence\-transformers，实现轻量化内存降级，核心对比如下：
+
+|对比项|sentence\-transformers|fastembed|
+|---|---|---|
+|核心依赖|PyTorch（约1GB）|ONNX Runtime（约50MB）|
+|启动内存占用|500\-800MB|200\-300MB|
+|向量化方式|encode\(\)|embed\(\) 生成器模式（更轻量化）|
+
+### 核心代码改动
+
+`src/rag.py` 适配改造：
+
+- 替换导入：`from fastembed import TextEmbedding`
+
+- 修改文本向量化调用：`list(_embedding_model.embed(texts))`
+
+- 修改查询向量化调用：`list(_embedding_model.embed([query]))[0]`
+
+- 移除 `local_files_only=True` 参数，适配生产环境联网模型加载
+
+### 依赖文件适配
+
+- `requirements.txt`：新增 fastembed，保留 sentence\-transformers（满足本地开发 Rerank 需求）
+
+- `requirements-prod.txt`：新增 fastembed，移除 sentence\-transformers（生产环境极致轻量化）
+
+- Render 构建命令：`pip install -r requirements-prod.txt`
+
+### 部署验证结果
+
+- ✅ 服务成功启动，运行内存稳定控制在 200\-300MB
+
+- ✅ FAISS\+FastEmbed 向量检索功能完全正常
+
+- ✅ LLM 重排逻辑稳定生效，无功能缺失
+
+- ✅ 公网服务可正常访问：[https://car\-insurance\-mvp\.onrender\.com](https://car-insurance-mvp.onrender.com)
+
+### 部署注意事项
+
+- 服务首次启动时，FastEmbed 会自动从 Hugging Face 下载模型（100\-150MB），启动耗时稍长，属于正常现象
+
+- 模型下载完成后会本地缓存，后续启动无需重复下载，秒级启动
+
+- 访问 Token 固定 7 天有效期，到期需重新运行脚本生成
+
+---
+
+**总结**：本文档按时间线完整记录了车险智能客服 MVP 从开发调试、问题排查、方案权衡到公网部署、性能优化的全流程关键决策，完整沉淀项目迭代经验，可作为项目复盘、技术迭代、二次开发的核心参考资料。
+
+> （注：部分内容可能由 AI 生成）
