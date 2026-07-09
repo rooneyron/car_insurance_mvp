@@ -17,6 +17,7 @@ class ErrorCode(str, Enum):
     
     # 输入层
     INPUT_TOO_LONG = "INPUT_TOO_LONG"
+    BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
     
     # 系统层
     GRAPH_RECURSION_LIMIT = "GRAPH_RECURSION_LIMIT"
@@ -34,6 +35,7 @@ USER_ERROR_MESSAGES = {
     ErrorCode.RERANK_TIMEOUT: "检索超时，已为您切换到基础模式",
     ErrorCode.RAG_SCORE_LOW: "未找到足够相关的条款，已为您切换到基础模式",
     ErrorCode.INPUT_TOO_LONG: "输入内容过长，请控制在1000字符以内",
+    ErrorCode.BUDGET_EXCEEDED: "今日 Token 配额已用完，请明天再试",
     ErrorCode.GRAPH_RECURSION_LIMIT: "处理超时，请重新提问",
     ErrorCode.UNKNOWN: "系统繁忙，请稍后再试",
 }

@@ -4,9 +4,7 @@ LangGraph StateGraph 多 Agent 编排
 """
 
 import os
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+import json
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
@@ -16,7 +14,6 @@ from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 from typing import Optional, TypedDict, Annotated
 from langgraph.graph.message import add_messages
-import json
 from src.constants import RAG_EMPTY_RESULT, TOOL_FINISHED_PREFIX, TRANSFER_SIGNAL
 from src.logger import get_logger
 from src.route_types import Route
@@ -95,12 +92,28 @@ def query_policy_logic(policy_id: str, id_card: str) -> str:
     return f"❌ 未找到保单（保单号：{policy_id}，身份证号：{id_card}），请核对信息后重新查询。"
 
 
+# ---------- 模块级 LLM 实例（供生产模式 RAG 重排复用）----------
+_rerank_llm: Optional[ChatOpenAI] = None
+
+
+def _get_rerank_llm() -> ChatOpenAI:
+    """获取用于 RAG 重排的 LLM 单例"""
+    global _rerank_llm
+    if _rerank_llm is None:
+        _rerank_llm = ChatOpenAI(
+            model=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+            api_key=os.environ.get("DEEPSEEK_API_KEY"),
+            base_url="https://api.deepseek.com/v1",
+            temperature=0,
+        )
+    return _rerank_llm
+
+
 def search_insurance_terms_logic(query: str) -> str:
     """
     RAG 检索条款核心逻辑。
     根据环境变量 USE_LOCAL_RERANK 决定使用本地 Rerank 还是 LLM 重排。
     """
-    # 读取环境变量，默认为 true（本地开发）
     use_local_rerank = os.environ.get("USE_LOCAL_RERANK", "true").lower() == "true"
 
     try:
@@ -117,12 +130,10 @@ def search_insurance_terms_logic(query: str) -> str:
 
         else:
             # ====== 生产模式：FAISS 召回 + LLM 重排 ======
-            # 1. FAISS 召回 Top-10
             candidates = retrieve_candidates(query, top_k=10)
             if not candidates:
                 return f"{TOOL_FINISHED_PREFIX}直接告知用户并建议转人工。"
 
-            # 2. 构造 Prompt 让 LLM 选择最相关的 2 条
             prompt = f"""你是一个保险条款检索助手。用户的问题是："{query}"
 
 请从以下候选条款中，选出最相关的 2 条，并按相关性从高到低排序。
@@ -131,17 +142,8 @@ def search_insurance_terms_logic(query: str) -> str:
 候选条款：
 {chr(10).join([f'[{i+1}] {c}' for i, c in enumerate(candidates)])}
 """
-            # 3. 调用 DeepSeek Chat API
-            llm = ChatOpenAI(
-                model=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
-                api_key=os.environ.get("DEEPSEEK_API_KEY"),
-                base_url="https://api.deepseek.com/v1",
-                temperature=0,
-            )
-            response = llm.invoke(prompt)
-            # 4. 解析返回结果
+            response = _get_rerank_llm().invoke(prompt)
             selected = [r.strip() for r in response.content.split('---') if r.strip()]
-            # 如果没有解析到任何内容，回退到前两条
             if not selected:
                 selected = candidates[:2]
 
@@ -151,7 +153,6 @@ def search_insurance_terms_logic(query: str) -> str:
             return output
 
     except Exception as e:
-        # 任何异常都返回降级文本
         return f"{TOOL_FINISHED_PREFIX}直接告知用户并建议转人工。"
 
 
@@ -262,7 +263,7 @@ def _make_agent_node(agent_chain, agent_name: str):
     return agent_node
 
 
-def init_graph(api_key: Optional[str] = None, model_name: str = "deepseek-v4-flash"):
+def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
     """
     初始化 StateGraph 编排图，返回编译后的图
     """
@@ -270,6 +271,8 @@ def init_graph(api_key: Optional[str] = None, model_name: str = "deepseek-v4-fla
         api_key = os.environ.get("DEEPSEEK_API_KEY")
         if not api_key:
             raise ValueError("请提供 DeepSeek API Key 或设置环境变量 DEEPSEEK_API_KEY")
+    if model_name is None:
+        model_name = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
     llm = ChatOpenAI(
         model=model_name,

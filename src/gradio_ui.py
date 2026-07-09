@@ -4,6 +4,7 @@ Gradio 交互界面
 """
 
 import time
+import random
 import gradio as gr
 from src.route_types import ROUTE_LABELS
 from src.error_types import DEFAULT_ERROR_MESSAGE
@@ -19,7 +20,7 @@ def create_gradio_interface():
         gr.Markdown("基于路由决策 + LangChain 构建")
 
         # 用 State 保存 session_id
-        session_state = gr.State(value=f"gradio_{int(time.time())}")
+        session_state = gr.State(value=f"gradio_{int(time.time())}_{random.randint(1000, 9999)}")
         chatbot = gr.Chatbot(label="对话窗口")
         msg = gr.Textbox(label="输入消息", placeholder="请输入你的问题...")
         clear = gr.Button("清空对话")
@@ -58,7 +59,7 @@ def create_gradio_interface():
 
         msg.submit(respond, [msg, chatbot, session_state], [msg, chatbot, session_state])
         clear.click(
-            lambda: (None, [], f"gradio_{int(time.time())}"),
+            lambda: (None, [], f"gradio_{int(time.time())}_{random.randint(1000, 9999)}"),
             None,
             [chatbot, session_state],
             queue=False

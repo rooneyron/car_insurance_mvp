@@ -15,7 +15,7 @@ import numpy as np
 from typing import List, Dict, Tuple
 import faiss
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from src.constants import RAG_EMPTY_RESULT
+from src.constants import RAG_EMPTY_RESULT, RAG_CHUNK_SIZE, RAG_CHUNK_OVERLAP, FAISS_RECALL_TOP_K
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -42,21 +42,11 @@ _reranker = None
 
 # ---------- 工具函数 ----------
 def _log_missed_query(query: str, best_score: float = None, faiss_recall: int = None):
-    """
-    记录检索失败或低质量的查询到日志文件
-    参数:
-        query: 用户查询
-        best_score: Rerank 最高分（如果存在）
-        faiss_recall: FAISS 召回数量（0 表示完全未命中）
-    """
-    log_dir = "data"
-    os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, "missed_queries.log")
-    with open(log_path, "a", encoding="utf-8") as f:
-        if faiss_recall == 0:
-            f.write(f"{time.time()} | query: {query} | FAISS_recall: 0 | best_score: N/A\n")
-        else:
-            f.write(f"{time.time()} | query: {query} | best_score: {best_score:.3f}\n")
+    """记录检索失败或低质量的查询"""
+    if faiss_recall == 0:
+        logger.warning("RAG未命中: query=%s, FAISS_recall=0", query)
+    else:
+        logger.warning("RAG低分: query=%s, best_score=%.3f", query, best_score)
 
 
 # ---------- 1. 文本切割 ----------
@@ -72,8 +62,8 @@ def load_and_chunk_terms(file_path: str = TERMS_FILE_PATH) -> List[Dict[str, str
     chunks = []
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50,
+        chunk_size=RAG_CHUNK_SIZE,
+        chunk_overlap=RAG_CHUNK_OVERLAP,
         separators=["\n\n", "\n", "。", "；", "，", " ", ""]
     )
 
@@ -183,6 +173,21 @@ def init_rag():
         logger.info("Rerank 模型加载完成")
 
 
+def _faiss_search(query: str, top_k: int = FAISS_RECALL_TOP_K) -> list:
+    """FAISS 粗排，返回候选文本列表"""
+    query_embedding = list(_embedding_model.embed([query]))[0]
+    query_vec = np.array([query_embedding]).astype('float32')
+
+    retrieve_k = min(top_k, len(_chunks))
+    distances, indices = _index.search(query_vec, retrieve_k)
+
+    candidates = []
+    for idx in indices[0]:
+        if 0 <= idx < len(_chunks):
+            candidates.append(_chunks[idx]["full_text"])
+    return candidates
+
+
 # ---------- 4. 检索 + Rerank ----------
 def search_terms(query: str, top_k: int = 3) -> List[str]:
     """
@@ -198,18 +203,7 @@ def search_terms(query: str, top_k: int = 3) -> List[str]:
 
     # Step A: FAISS 粗排
     start_faiss = time.time()
-    # fastembed 的 embed 返回生成器，取第一个
-    query_embedding = list(_embedding_model.embed([query]))[0]
-    query_vec = np.array([query_embedding]).astype('float32')
-
-    retrieve_k = min(10, len(_chunks))
-    distances, indices = _index.search(query_vec, retrieve_k)
-
-    candidates = []
-    for idx in indices[0]:
-        if idx >= 0 and idx < len(_chunks):
-            candidates.append(_chunks[idx]["full_text"])
-
+    candidates = _faiss_search(query)
     elapsed_faiss = (time.time() - start_faiss) * 1000
     logger.info("FAISS 检索: %.0fms, 召回 %d 个候选", elapsed_faiss, len(candidates))
 
@@ -248,19 +242,7 @@ def retrieve_candidates(query: str, top_k: int = 10) -> List[str]:
     if _index is None or not _chunks:
         init_rag()
 
-    # 向量化查询
-    query_embedding = list(_embedding_model.embed([query]))[0]
-    query_vec = np.array([query_embedding]).astype('float32')
-
-    retrieve_k = min(top_k, len(_chunks))
-    distances, indices = _index.search(query_vec, retrieve_k)
-
-    candidates = []
-    for idx in indices[0]:
-        if idx >= 0 and idx < len(_chunks):
-            candidates.append(_chunks[idx]["full_text"])
-
-    return candidates
+    return _faiss_search(query, top_k)
 
 
 # ---------- 5. 测试代码 ----------

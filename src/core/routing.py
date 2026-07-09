@@ -1,14 +1,8 @@
-import sys
-import os
-# 获取当前文件所在目录的父目录的父目录（即项目根目录）
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, PROJECT_ROOT)
-
 import re
-import yaml
 import os
+import yaml
 from typing import Optional, Literal
-from route_types import Route, ROUTE_LABELS
+from src.route_types import Route, ROUTE_LABELS
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -32,6 +26,7 @@ SERVICE_KEYWORDS = keywords.get("service", [])
 FORCE_SERVICE_KEYWORDS = keywords.get("force_service", [])  # 可选
 
 # ---------- 2. 会话状态管理 ----------
+_SESSION_INTENT_MAX = 1000  # 防止内存无限增长
 session_intent_store = {}
 
 def get_session_intent(session_id: str) -> Optional[Route]:
@@ -41,6 +36,11 @@ def set_session_intent(session_id: str, intent: Optional[Route]):
     if intent is None:
         session_intent_store.pop(session_id, None)
     else:
+        # 超过上限时清理最早的一半条目
+        if len(session_intent_store) >= _SESSION_INTENT_MAX:
+            keys_to_remove = list(session_intent_store.keys())[:_SESSION_INTENT_MAX // 2]
+            for k in keys_to_remove:
+                session_intent_store.pop(k, None)
         session_intent_store[session_id] = intent
 
 # ---------- 3. 关键词扫描（从配置文件读取） ----------
