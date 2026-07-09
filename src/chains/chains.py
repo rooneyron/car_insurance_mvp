@@ -1,5 +1,6 @@
 """
-三个 Chain 的初始化 + Memory 挂载（带摘要 + 日志）
+LangGraph StateGraph 多 Agent 编排
+路由作为图的一等公民节点，三个 Agent 作为执行节点
 """
 
 import os
@@ -9,12 +10,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph, START, END
 from langmem.short_term import SummarizationNode
 from langchain_core.tools import tool
-from typing import Optional
+from langchain_core.runnables import RunnableConfig
+from typing import Optional, TypedDict, Annotated
+from langgraph.graph.message import add_messages
 import json
 from src.constants import RAG_EMPTY_RESULT, TOOL_FINISHED_PREFIX, TRANSFER_SIGNAL
 from src.logger import get_logger
+from src.route_types import Route
 
 logger = get_logger(__name__)
 
@@ -186,12 +191,80 @@ def transfer_to_human(reason: str) -> str:
 
 
 # ============================================================
-# 3. 初始化三个 Chain（带摘要）
+# 3. StateGraph 编排：路由 + 多 Agent 节点
 # ============================================================
 
-def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-flash"):
+class GraphState(TypedDict):
+    """编排图的状态定义"""
+    messages: Annotated[list, add_messages]  # 对话消息
+    route: str  # 路由决策结果
+    reply: str  # 最终回复文本
+
+
+def _create_summarization_node(llm):
+    """创建摘要节点（供各 Agent 共享）"""
+    return SummarizationNode(
+        max_tokens=2000,
+        max_summary_tokens=500,
+        model=llm,
+        input_messages_key="messages",
+        output_messages_key="messages",
+    )
+
+
+def _make_route_node():
+    """创建路由节点函数"""
+    from src.core.routing import decide_route
+
+    def route_node(state: GraphState, config: RunnableConfig) -> dict:
+        """路由节点：根据用户消息决定走哪个 Agent"""
+        session_id = config.get("configurable", {}).get("thread_id", "default")
+        messages = state.get("messages", [])
+        if not messages:
+            return {"route": Route.GENERAL.value}
+
+        # 取最后一条用户消息
+        last_msg = messages[-1]
+        content = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
+
+        # 调用路由决策
+        route = decide_route(session_id, content)
+        logger.info("图内路由决策: session=%s, route=%s", session_id, route.value)
+        return {"route": route.value}
+
+    return route_node
+
+
+def _make_agent_node(agent_chain, agent_name: str):
+    """创建 Agent 节点工厂"""
+    def agent_node(state: GraphState, config: RunnableConfig) -> dict:
+        """Agent 执行节点"""
+        messages = state.get("messages", [])
+        logger.info("执行 Agent 节点: %s", agent_name)
+
+        # 调用子 Agent（create_react_agent）
+        result = agent_chain.invoke({"messages": messages}, config=config)
+
+        # 提取回复
+        result_messages = result.get("messages", [])
+        if result_messages:
+            last_msg = result_messages[-1]
+            reply = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
+        else:
+            reply = ""
+
+        logger.info("Agent %s 回复: %s...", agent_name, reply[:50])
+        return {
+            "messages": result_messages,  # 更新消息历史
+            "reply": reply,
+        }
+
+    return agent_node
+
+
+def init_graph(api_key: Optional[str] = None, model_name: str = "deepseek-v4-flash"):
     """
-    初始化三个 Chain，并返回它们和共享 Memory（带摘要）
+    初始化 StateGraph 编排图，返回编译后的图
     """
     if api_key is None:
         api_key = os.environ.get("DEEPSEEK_API_KEY")
@@ -206,18 +279,12 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-fl
     )
 
     # ---------- 创建摘要节点 ----------
-    summarization_node = SummarizationNode(
-        max_tokens=2000,          
-        max_summary_tokens=500,
-        model=llm,
-        input_messages_key="messages",
-        output_messages_key="messages",
-    )
+    summarization_node = _create_summarization_node(llm)
 
     # ---------- 共享 Memory ----------
     memory = MemorySaver()
 
-    # ---------- 普通链 ----------
+    # ---------- 创建三个子 Agent（create_react_agent）----------
     general_chain = create_react_agent(
         model=llm,
         tools=[],
@@ -229,7 +296,6 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-fl
 如果用户主动提供信息来协助查询，你可以简单回应"已记录"或直接引导到具体业务。""",
     )
 
-    # ---------- 报价链 ----------
     sale_tools = [calculate_premium, search_insurance_terms]
     agent_sale = create_react_agent(
         model=llm,
@@ -244,7 +310,6 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-fl
 3. 请友好、专业地回答。""",
     )
 
-    # ---------- 理赔链 ----------
     service_tools = [query_policy, search_insurance_terms, transfer_to_human]
     agent_service = create_react_agent(
         model=llm,
@@ -260,7 +325,59 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-fl
 4. 必要时可转人工。""",
     )
 
-    return general_chain, agent_sale, agent_service, memory
+    # ---------- 构建 StateGraph 编排图 ----------
+    logger.info("构建 StateGraph 编排图...")
+
+    # 创建节点函数
+    route_node = _make_route_node()
+    general_node = _make_agent_node(general_chain, "general")
+    sale_node = _make_agent_node(agent_sale, "sale")
+    service_node = _make_agent_node(agent_service, "service")
+
+    # 构建图
+    builder = StateGraph(GraphState)
+
+    # 添加节点
+    builder.add_node("route", route_node)
+    builder.add_node("general", general_node)
+    builder.add_node("sale", sale_node)
+    builder.add_node("service", service_node)
+
+    # 设置入口
+    builder.add_edge(START, "route")
+
+    # 条件分支：根据路由结果决定走哪个 Agent
+    def route_decision(state: GraphState) -> str:
+        route = state.get("route", Route.GENERAL.value)
+        if route == Route.SALE.value:
+            return "sale"
+        elif route == Route.SERVICE.value:
+            return "service"
+        else:
+            return "general"
+
+    builder.add_conditional_edges(
+        "route",
+        route_decision,
+        {
+            "sale": "sale",
+            "service": "service",
+            "general": "general",
+        }
+    )
+
+    # 所有 Agent 执行完后结束
+    builder.add_edge("general", END)
+    builder.add_edge("sale", END)
+    builder.add_edge("service", END)
+
+    # 编译图
+    graph = builder.compile(checkpointer=memory)
+
+    logger.info("✅ StateGraph 编排图构建完成")
+    logger.info("📊 图结构: START -> route -> [general|sale|service] -> END")
+
+    return graph
 
 
 # ============================================================
@@ -270,16 +387,20 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-fl
 if __name__ == "__main__":
     from src.logger import setup_logging
     setup_logging()
-    logger.info(">>> 开始测试 Chain 初始化...")
+    logger.info(">>> 开始测试 StateGraph 初始化...")
 
     try:
-        general, sale_agent, service_agent, memory = init_chains()
+        graph = init_graph()
 
-        logger.info("✅ 三个 Chain 初始化成功！")
-        logger.info("  - General Chain 类型: %s", type(general).__name__)
-        logger.info("  - Sale Agent 类型: %s", type(sale_agent).__name__)
-        logger.info("  - Service Agent 类型: %s", type(service_agent).__name__)
-        logger.info("  - Memory 类型: %s", type(memory).__name__)
+        logger.info("✅ StateGraph 初始化成功！")
+        logger.info("  - Graph 类型: %s", type(graph).__name__)
+
+        # 尝试生成 Mermaid 图
+        try:
+            mermaid = graph.get_graph().draw_mermaid()
+            logger.info("📊 Mermaid 图生成成功:\n%s", mermaid)
+        except Exception as e:
+            logger.warning("Mermaid 图生成失败: %s", e)
 
         logger.info(">>> 测试工具逻辑（纯函数，MCP 就绪）...")
         logger.info("  - calculate_premium_logic: %s", calculate_premium_logic('特斯拉 Model 3', 30, 8))

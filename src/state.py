@@ -1,17 +1,13 @@
 """
 全局状态管理
-存储预加载的 Chain 实例，供各模块共享引用。
+存储编译后的 LangGraph 编排图，供各模块共享引用。
 """
 
-# 预加载时初始化的 Chain 实例
-general_chain = None
-agent_sale = None
-agent_service = None
+# 编译后的 StateGraph 编排图
+graph = None
 
 
-def set_chains(general, sale, service):
-    """设置全局 Chain 引用"""
-    global general_chain, agent_sale, agent_service
-    general_chain = general
-    agent_sale = sale
-    agent_service = service
+def set_graph(compiled_graph):
+    """设置全局编排图引用"""
+    global graph
+    graph = compiled_graph
