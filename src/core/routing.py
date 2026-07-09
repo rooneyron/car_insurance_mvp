@@ -9,6 +9,9 @@ import yaml
 import os
 from typing import Optional, Literal
 from route_types import Route, ROUTE_LABELS
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 # ---------- 1. 加载配置文件（支持热更新） ----------
@@ -94,7 +97,9 @@ def decide_route(session_id: str, message: str) -> Route:
 
 # ---------- 6. 自测 ----------
 if __name__ == "__main__":
-    print(">>> 开始路由逻辑自测（关键词从 config.yaml 加载）...")
+    from src.logger import setup_logging
+    setup_logging()
+    logger.info(">>> 开始路由逻辑自测（关键词从 config.yaml 加载）...")
     # 每个用例独立 session，避免状态污染
     test_cases = [
         ("你好", Route.GENERAL),
@@ -114,11 +119,11 @@ if __name__ == "__main__":
         sid = f"test_user_{idx}"
         result = decide_route(sid, msg)
         status = "✅" if result == expected else "❌"
-        print(f"消息: '{msg:15}' -> 路由: {result:8} 预期: {expected:8} {status}")
+        logger.info("消息: '%s' -> 路由: %s 预期: %s %s", msg, result, expected, status)
         if result != expected:
             all_pass = False
     
     if all_pass:
-        print("\n🎉 路由逻辑验证通过！配置文件生效。")
+        logger.info("🎉 路由逻辑验证通过！配置文件生效。")
     else:
-        print("\n⚠️ 有测试用例失败，请检查 config.yaml 中的关键词配置。")
+        logger.warning("⚠️ 有测试用例失败，请检查 config.yaml 中的关键词配置。")

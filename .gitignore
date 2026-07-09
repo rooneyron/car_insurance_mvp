@@ -16,6 +16,12 @@ env/
 # 环境变量（如果有）
 .env
 
+# 数据文件（向量索引、缓存、日志）
+data/*.pkl
+data/*.bin
+data/*.log
+data/usage_cache.json
+
 # 操作系统
 .DS_Store
 Thumbs.db

@@ -14,6 +14,9 @@ from langchain_core.tools import tool
 from typing import Optional
 import json
 from src.constants import RAG_EMPTY_RESULT, TOOL_FINISHED_PREFIX, TRANSFER_SIGNAL
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 # 根据环境变量决定是否使用本地 Rerank
 from src.rag import search_terms, retrieve_candidates
@@ -265,32 +268,28 @@ def init_chains(api_key: Optional[str] = None, model_name: str = "deepseek-v4-fl
 # ============================================================
 
 if __name__ == "__main__":
-    print(">>> 开始测试 Chain 初始化...")
+    from src.logger import setup_logging
+    setup_logging()
+    logger.info(">>> 开始测试 Chain 初始化...")
 
     try:
         general, sale_agent, service_agent, memory = init_chains()
 
-        print("✅ 三个 Chain 初始化成功！")
-        print(f"  - General Chain 类型: {type(general).__name__}")
-        print(f"  - Sale Agent 类型: {type(sale_agent).__name__}")
-        print(f"  - Service Agent 类型: {type(service_agent).__name__}")
-        print(f"  - Memory 类型: {type(memory).__name__}")
+        logger.info("✅ 三个 Chain 初始化成功！")
+        logger.info("  - General Chain 类型: %s", type(general).__name__)
+        logger.info("  - Sale Agent 类型: %s", type(sale_agent).__name__)
+        logger.info("  - Service Agent 类型: %s", type(service_agent).__name__)
+        logger.info("  - Memory 类型: %s", type(memory).__name__)
 
-        print("\n>>> 测试工具逻辑（纯函数，MCP 就绪）...")
-        print("  - calculate_premium_logic:")
-        print(f"    {calculate_premium_logic('特斯拉 Model 3', 30, 8)}")
-        print("  - query_policy_logic:")
-        print(f"    {query_policy_logic('POL20260001', '110101199001011234')}")
-        print("  - search_insurance_terms_logic:")
-        print(f"    {search_insurance_terms_logic('车损险')}")
-        print("  - transfer_to_human_logic:")
-        print(f"    {transfer_to_human_logic('用户要求转人工')}")
+        logger.info(">>> 测试工具逻辑（纯函数，MCP 就绪）...")
+        logger.info("  - calculate_premium_logic: %s", calculate_premium_logic('特斯拉 Model 3', 30, 8))
+        logger.info("  - query_policy_logic: %s", query_policy_logic('POL20260001', '110101199001011234'))
+        logger.info("  - search_insurance_terms_logic: %s", search_insurance_terms_logic('车损险'))
+        logger.info("  - transfer_to_human_logic: %s", transfer_to_human_logic('用户要求转人工'))
 
-        print("\n✅ 所有工具逻辑测试通过。")
-        print("📌 将来迁移 MCP 时，直接复用上述 _logic 函数即可。")
+        logger.info("✅ 所有工具逻辑测试通过。")
+        logger.info("📌 将来迁移 MCP 时，直接复用上述 _logic 函数即可。")
 
     except Exception as e:
-        print(f"❌ 初始化失败: {e}")
-        print("\n请确保:")
-        print("  1. 已设置环境变量 DEEPSEEK_API_KEY")
-        print("  2. 或者修改 init_chains() 调用，传入 api_key 参数")
+        logger.error("❌ 初始化失败: %s", e, exc_info=True)
+        logger.error("请确保: 1. 已设置环境变量 DEEPSEEK_API_KEY")

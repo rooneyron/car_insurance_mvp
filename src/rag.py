@@ -16,6 +16,9 @@ from typing import List, Dict, Tuple
 import faiss
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from src.constants import RAG_EMPTY_RESULT
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 # ---------- 全局配置 ----------
 # 本地 Embedding 模型（33MB，轻量快速）
@@ -97,7 +100,7 @@ def load_and_chunk_terms(file_path: str = TERMS_FILE_PATH) -> List[Dict[str, str
                 "full_text": f"{title}\n{body}"
             })
 
-    print(f"[RAG] 切割完成，共生成 {len(chunks)} 个文本块")
+    logger.info("切割完成，共生成 %d 个文本块", len(chunks))
     return chunks
 
 
@@ -107,21 +110,21 @@ def build_or_load_index() -> Tuple[faiss.Index, List[Dict]]:
     global _chunks, _embedding_model
 
     if os.path.exists(FAISS_INDEX_PATH) and os.path.exists(CHUNKS_PKL_PATH):
-        print("[RAG] 检测到本地索引文件，正在加载...")
+        logger.info("检测到本地索引文件，正在加载...")
         index = faiss.read_index(FAISS_INDEX_PATH)
         with open(CHUNKS_PKL_PATH, "rb") as f:
             _chunks = pickle.load(f)
-        print(f"[RAG] 加载成功，共 {len(_chunks)} 个块")
+        logger.info("加载成功，共 %d 个块", len(_chunks))
         return index, _chunks
 
-    print("[RAG] 未找到本地索引，开始构建...")
+    logger.info("未找到本地索引，开始构建...")
 
     # 1. 加载 Embedding 模型（使用 fastembed，轻量级）
     if _embedding_model is None:
-        print("[RAG] 正在加载轻量级 Embedding 模型 (fastembed/bge-small-zh-v1.5)...")
+        logger.info("正在加载轻量级 Embedding 模型 (fastembed/bge-small-zh-v1.5)...")
         from fastembed import TextEmbedding
         _embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL)
-        print("[RAG] Embedding 模型加载完成")
+        logger.info("Embedding 模型加载完成")
 
     # 2. 切割文本
     chunks = load_and_chunk_terms()
@@ -143,7 +146,7 @@ def build_or_load_index() -> Tuple[faiss.Index, List[Dict]]:
     with open(CHUNKS_PKL_PATH, "wb") as f:
         pickle.dump(chunks, f)
 
-    print(f"[RAG] 构建完成，索引已保存至 {FAISS_INDEX_PATH}")
+    logger.info("构建完成，索引已保存至 %s", FAISS_INDEX_PATH)
     return index, chunks
 
 
@@ -160,24 +163,24 @@ def init_rag():
 
     # 加载 Embedding 模型（如果还没加载）
     if _embedding_model is None:
-        print("[RAG] 正在加载轻量级 Embedding 模型...")
+        logger.info("正在加载轻量级 Embedding 模型...")
         from fastembed import TextEmbedding
         _embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL)
-        print("[RAG] Embedding 模型加载完成")
+        logger.info("Embedding 模型加载完成")
 
     # ---------- 检查是否跳过 Rerank ----------
     use_local_rerank = os.environ.get("USE_LOCAL_RERANK", "true").lower() == "true"
     if not use_local_rerank:
-        print("[RAG] 生产环境：跳过加载本地 Rerank 模型（1.1GB）")
+        logger.info("生产环境：跳过加载本地 Rerank 模型（1.1GB）")
         return  # 直接返回，不加载 Rerank
 
     # 加载 Rerank 模型（仅在本地开发时加载，延迟导入 sentence_transformers）
     if _reranker is None:
-        print("[RAG] 正在加载本地 Rerank 模型 (BAAI/bge-reranker-base)，约 1.1GB...")
+        logger.info("正在加载本地 Rerank 模型 (BAAI/bge-reranker-base)，约 1.1GB...")
         # 延迟导入，避免生产环境安装 sentence_transformers
         from sentence_transformers import CrossEncoder
         _reranker = CrossEncoder(RERANK_MODEL, max_length=512, local_files_only=True)
-        print("[RAG] Rerank 模型加载完成")
+        logger.info("Rerank 模型加载完成")
 
 
 # ---------- 4. 检索 + Rerank ----------
@@ -208,7 +211,7 @@ def search_terms(query: str, top_k: int = 3) -> List[str]:
             candidates.append(_chunks[idx]["full_text"])
 
     elapsed_faiss = (time.time() - start_faiss) * 1000
-    print(f"[RAG计时] FAISS 检索: {elapsed_faiss:.0f}ms, 召回 {len(candidates)} 个候选")
+    logger.info("FAISS 检索: %.0fms, 召回 %d 个候选", elapsed_faiss, len(candidates))
 
     # 如果 FAISS 完全搜不到任何候选
     if not candidates:
@@ -220,7 +223,7 @@ def search_terms(query: str, top_k: int = 3) -> List[str]:
     pairs = [[query, cand] for cand in candidates]
     scores = _reranker.predict(pairs)
     elapsed_rerank = (time.time() - start_rerank) * 1000
-    print(f"[RAG计时] Rerank 推理: {elapsed_rerank:.0f}ms (对 {len(candidates)} 个候选)")
+    logger.info("Rerank 推理: %.0fms (对 %d 个候选)", elapsed_rerank, len(candidates))
 
     sorted_results = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
 
@@ -262,8 +265,10 @@ def retrieve_candidates(query: str, top_k: int = 10) -> List[str]:
 
 # ---------- 5. 测试代码 ----------
 if __name__ == "__main__":
-    print(">>> 开始测试生产级 RAG 系统（纯本地，零外部 API）...")
-    print(">>> 首次运行将自动下载 Embedding 模型（33MB）和 Rerank 模型（1.1GB）...")
+    from src.logger import setup_logging
+    setup_logging()
+    logger.info(">>> 开始测试生产级 RAG 系统（纯本地，零外部 API）...")
+    logger.info(">>> 首次运行将自动下载 Embedding 模型（33MB）和 Rerank 模型（1.1GB）...")
 
     init_rag()
 
@@ -276,8 +281,8 @@ if __name__ == "__main__":
     ]
 
     for q in test_queries:
-        print(f"\n>>> 用户问: {q}")
+        logger.info("用户问: %s", q)
         results = search_terms(q, top_k=2)
         for i, r in enumerate(results):
             preview = r[:100] + "..." if len(r) > 100 else r
-            print(f"  [{i+1}] (Reranked) {preview}")
+            logger.info("  [%d] (Reranked) %s", i+1, preview)

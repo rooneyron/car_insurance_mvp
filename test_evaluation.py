@@ -14,7 +14,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # 导入核心函数
-from app import chat_api
+from src.chat import chat_api
 from src.core.routing import session_intent_store, set_session_intent
 
 

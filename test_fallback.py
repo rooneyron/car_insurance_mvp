@@ -36,7 +36,7 @@ def test_input_too_long():
     # 更好的方法：直接导入 app 模块测试
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from app import chat_api
+    from src.chat import chat_api
     
     result = chat_api("test_session", long_message)
     if result["success"] == -1 and "输入内容过长" in result.get("error_msg", ""):
