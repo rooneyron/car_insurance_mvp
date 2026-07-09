@@ -28,6 +28,10 @@
 
 - ✅ 公网部署（Render）
 
+- ✅ LangGraph StateGraph 多 Agent 编排（route → insurance → general 三级图编排）
+
+- ✅ RAGAS 质量评估（15 条测试集 + 4 大指标量化 RAG 链路质量）
+
 ## 技术栈
 
 - Python 3\.12\+
@@ -53,6 +57,8 @@
 |RAG 检索|FAISS 向量检索 \+ FastEmbed 轻量级 Embedding|
 |工具调用|保费计算、保单查询、转人工|
 |访问控制|JWT Token 认证，7天有效期|
+|Agent 编排|LangGraph StateGraph 构建多 Agent 协作图，条件路由动态调度|
+|质量评估|RAGAS 4 大指标量化评估，faithfulness 0.98 / context_precision 0.97|
 |成本控制|每日 Token 限额，JSON 日志记录|
 
 ## 快速开始
@@ -104,30 +110,43 @@ python generate_token.py
 
 ```text
 car_insurance_mvp/
-├── app.py                 # FastAPI + Gradio 主入口
+├── app.py                 # FastAPI 主入口
 ├── generate_token.py      # JWT Token 生成脚本
+├── test_ragas.py          # RAGAS 评估脚本
 ├── requirements.txt       # 本地开发依赖
 ├── requirements-prod.txt  # 生产环境轻量依赖
 ├── src/
 │   ├── core/
 │   │   └── routing.py     # 路由决策模块
 │   ├── chains/
-│   │   └── chains.py      # Agent 初始化 + 工具定义
-│   ├── rag.py             # RAG 检索模块（FastEmbed）
+│   │   └── chains.py      # LangGraph StateGraph 编排
+│   ├── memory/
+│   │   └── __init__.py    # 跨轮 Memory 管理
+│   ├── tools/
+│   │   └── __init__.py    # 工具函数（查保单/算保费/转人工）
+│   ├── api.py             # REST API 路由
+│   ├── chat.py            # 对话调度（LangGraph 入口）
+│   ├── gradio_ui.py       # Gradio 界面
+│   ├── rag.py             # RAG 检索（FAISS + BGE-Reranker）
+│   ├── state.py           # LangGraph 状态定义
+│   ├── logger.py          # 统一日志配置
 │   ├── token_usage.py     # Token 统计与限额
 │   ├── constants.py       # 跨模块常量
 │   ├── error_types.py     # 错误码与用户提示
 │   └── route_types.py     # 路由枚举
 ├── data/
-│   ├── policies.json      # 模拟保单数据
-│   ├── insurance_terms.txt # 保险条款知识库
-│   ├── faiss_index.bin    # FAISS 向量索引文件
-│   └── chunks.pkl         # 文本切块缓存文件
-├── config/
-│   └── config.yaml        # 路由关键词配置文件
-└── docs/
-    ├── EXPERIENCE_LOG.md  # 项目开发决策日志
-    └── TEST_LOG.md        # 项目测试报告
+│   ├── policies.json          # 模拟保单数据
+│   ├── insurance_terms.txt    # 保险条款知识库
+│   ├── faiss_index.bin        # FAISS 向量索引
+│   ├── chunks.pkl             # 文本切块缓存
+│   └── ragas_report.json      # RAGAS 评估基线报告
+├── doc/
+│   ├── architecture.mmd       # 系统架构图（Mermaid 源文件）
+│   ├── architecture.png       # 系统架构图（PNG）
+│   ├── EXPERIENCE_LOG.md      # 开发决策日志
+│   └── TEST_LOG.md            # 测试报告
+└── config/
+    └── config.yaml        # 路由关键词配置
 ```
 
 ## 关键决策记录
@@ -144,6 +163,10 @@ car_insurance_mvp/
 
 - 接入 Memory 上下文摘要压缩模块，优化多轮对话上下文冗余问题
 
+- 用 LangGraph StateGraph 替代手动路由，构建 route → insurance → general 多 Agent 编排图，实现条件分支动态调度
+
+- 接入 RAGAS 评估框架，基于 15 条人工测试集量化 RAG 链路质量，faithfulness 0.98 / context_precision 0.97
+
 ## 演示注意事项
 
 - Render 免费实例 15 分钟无访问后自动休眠，再次访问唤醒耗时约 30\-60 秒
@@ -158,6 +181,4 @@ car_insurance_mvp/
 
 项目命名、核心技术难题的解决，均离不开相关技术助力。
 
-2026\.07\.09
-
-> （注：部分内容可能由 AI 生成）
+2026\.07\.10
