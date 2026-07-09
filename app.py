@@ -18,7 +18,7 @@ import uvicorn
 import gradio as gr
 from src.api import create_app
 from src.gradio_ui import create_gradio_interface
-from src.state import set_chains
+from src.state import set_graph
 
 
 # ============================================================
@@ -27,13 +27,13 @@ from src.state import set_chains
 if __name__ == "__main__":
     # ---------- 预加载：启动时加载所有模型 ----------
     logger.info("正在预加载模型...")
-    from src.chains.chains import init_chains
+    from src.chains.chains import init_graph
     from src.rag import init_rag
 
     try:
-        # 初始化 Chain，获取三个 Agent 和 Memory
-        general_chain, agent_sale, agent_service, _ = init_chains()
-        set_chains(general_chain, agent_sale, agent_service)
+        # 初始化 StateGraph 编排图
+        graph = init_graph()
+        set_graph(graph)
         # 初始化 RAG（加载 FAISS 索引和模型）
         init_rag()
         logger.info("预加载完成")
