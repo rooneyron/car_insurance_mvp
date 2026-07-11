@@ -3,6 +3,7 @@ LangGraph StateGraph 多 Agent 编排
 路由作为图的一等公民节点，三个 Agent 作为执行节点
 """
 
+from math import log
 import os
 import json
 from langchain_openai import ChatOpenAI
@@ -245,7 +246,6 @@ def _make_agent_node(agent_chain, agent_name: str):
 
         # 调用子 Agent（create_react_agent）
         result = agent_chain.invoke({"messages": messages}, config=config)
-
         # 提取回复
         result_messages = result.get("messages", [])
         if result_messages:

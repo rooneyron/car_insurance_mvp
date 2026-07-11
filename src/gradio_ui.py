@@ -3,8 +3,7 @@ Gradio 交互界面
 提供 Web UI 供用户与智能客服对话。
 """
 
-import time
-import random
+import uuid
 import gradio as gr
 from src.route_types import ROUTE_LABELS
 from src.error_types import DEFAULT_ERROR_MESSAGE
@@ -19,16 +18,17 @@ def create_gradio_interface():
         gr.Markdown("# 🚗 车险智能客服 MVP")
         gr.Markdown("基于路由决策 + LangChain 构建")
 
-        # 用 State 保存 session_id
-        session_state = gr.State(value=f"gradio_{int(time.time())}_{random.randint(1000, 9999)}")
+        # 用 State 保存 session_id（初始为空，页面加载时动态生成）
+        session_state = gr.State(value="")
         chatbot = gr.Chatbot(label="对话窗口")
         msg = gr.Textbox(label="输入消息", placeholder="请输入你的问题...")
         clear = gr.Button("清空对话")
 
         # 核心响应函数：先显示状态，再显示回复
         def respond(message, chat_history, session_id):
-            if not message:
-                return "", chat_history, session_id
+            if not message or not message.strip():
+                yield "", chat_history, session_id
+                return
 
             # 第一步：立即显示"正在理解问题..."
             chat_history.append({"role": "user", "content": message})
@@ -57,9 +57,15 @@ def create_gradio_interface():
             chat_history[-1] = {"role": "assistant", "content": final_reply}
             yield "", chat_history, session_id
 
+        def _new_session_id():
+            return f"gradio_{uuid.uuid4().hex[:12]}"
+
+        # 每次页面加载/刷新时，生成全新 session_id（等效换用户）
+        demo.load(lambda: _new_session_id(), None, session_state)
+
         msg.submit(respond, [msg, chatbot, session_state], [msg, chatbot, session_state])
         clear.click(
-            lambda: (None, [], f"gradio_{int(time.time())}_{random.randint(1000, 9999)}"),
+            lambda: (None, [], _new_session_id()),
             None,
             [chatbot, session_state],
             queue=False
