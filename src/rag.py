@@ -30,8 +30,8 @@ FAISS_INDEX_PATH = "data/faiss_index.bin"
 CHUNKS_PKL_PATH = "data/chunks.pkl"
 TERMS_FILE_PATH = "data/insurance_terms.txt"
 
-# RAG 检索质量阈值（Rerank 分数低于此值视为无效）
-RAG_SCORE_THRESHOLD = 0.6
+# RAG 检索质量阈值（Rerank 分数低于此值视为无效，可在 .env 中调整）
+RAG_SCORE_THRESHOLD = float(os.environ.get("RAG_SCORE_THRESHOLD", "0.6"))
 
 # ---------- 全局变量 ----------
 _index = None
@@ -196,6 +196,10 @@ def search_terms(query: str, top_k: int = 3) -> List[str]:
     2. Cross-Encoder 精排（输出 Top-K）
     如果精排最高分低于阈值，返回 ["未找到相关内容"]，并记录日志。
     """
+    # ====== 新增日志：打印查询词 ======
+    logger.info("RAG检索查询词: %s", query)
+    # ================================
+
     global _index, _chunks, _embedding_model, _reranker
 
     if _index is None or not _chunks:
@@ -220,6 +224,7 @@ def search_terms(query: str, top_k: int = 3) -> List[str]:
     logger.info("Rerank 推理: %.0fms (对 %d 个候选)", elapsed_rerank, len(candidates))
 
     sorted_results = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
+    logger.info("Rerank 分数详情: %s", [(text[:50], score) for text, score in sorted_results[:5]])
 
     # 检查最高分是否低于阈值
     best_score = sorted_results[0][1]

@@ -15,7 +15,8 @@ from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 from typing import Optional, TypedDict, Annotated
 from langgraph.graph.message import add_messages
-from src.constants import RAG_EMPTY_RESULT, TOOL_FINISHED_PREFIX, TRANSFER_SIGNAL
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from src.constants import RAG_EMPTY_RESULT, TOOL_FINISHED_PREFIX, TRANSFER_SIGNAL, RAG_FALLBACK_MESSAGE
 from src.logger import get_logger
 from src.route_types import Route
 from src.timing_callback import get_timing_handler
@@ -124,7 +125,7 @@ def search_insurance_terms_logic(query: str) -> str:
             # ====== 本地模式：FAISS + Rerank ======
             results = search_terms(query, top_k=2)
             if not results or results == [RAG_EMPTY_RESULT]:
-                return f"{TOOL_FINISHED_PREFIX}直接告知用户并建议转人工。"
+                return f"{TOOL_FINISHED_PREFIX}{RAG_FALLBACK_MESSAGE}"
 
             output = f"📄 关于「{query}」的相关条款（已智能排序）：\n\n"
             for i, result in enumerate(results, 1):
@@ -135,7 +136,7 @@ def search_insurance_terms_logic(query: str) -> str:
             # ====== 生产模式：FAISS 召回 + LLM 重排 ======
             candidates = retrieve_candidates(query, top_k=10)
             if not candidates:
-                return f"{TOOL_FINISHED_PREFIX}直接告知用户并建议转人工。"
+                return f"{TOOL_FINISHED_PREFIX}{RAG_FALLBACK_MESSAGE}"
 
             prompt = f"""你是一个保险条款检索助手。用户的问题是："{query}"
 
@@ -156,7 +157,7 @@ def search_insurance_terms_logic(query: str) -> str:
             return output
 
     except Exception as e:
-        return f"{TOOL_FINISHED_PREFIX}直接告知用户并建议转人工。"
+        return f"{TOOL_FINISHED_PREFIX}{RAG_FALLBACK_MESSAGE}"
 
 
 def transfer_to_human_logic(reason: str) -> str:
@@ -248,8 +249,30 @@ def _make_agent_node(agent_chain, agent_name: str):
         messages = state.get("messages", [])
         logger.info("执行 Agent 节点: %s", agent_name)
 
-        # 调用子 Agent（create_react_agent）
-        result = agent_chain.invoke({"messages": messages}, config=config)
+        # ---------- 压缩上下文：移除历史的工具调用记录 ----------
+        # 跳过带 tool_calls 的 AIMessage 和所有连续的 ToolMessage
+        # 保留 HumanMessage 和普通 AIMessage（对话上下文）
+        filtered = []
+        skip_tool = False
+        for msg in messages:
+            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                skip_tool = True
+                continue
+            if skip_tool and msg.type == "tool":
+                continue  # 继续跳过，不重置标记（支持多条 ToolMessage）
+            skip_tool = False  # 遇到非 ToolMessage 才重置
+            filtered.append(msg)
+
+        # 如果过滤后消息列表为空或只有 System Prompt，插入一条占位消息
+        # 避免消息链断裂导致 LLM 困惑
+        if len(filtered) <= 1:
+            filtered.insert(0, SystemMessage(
+                content="系统提示：历史对话中已执行过工具调用，结果已整合到对话中。"
+            ))
+        # ---------- 压缩上下文结束 ----------
+
+        # 调用子 Agent（create_react_agent），传入压缩后的消息
+        result = agent_chain.invoke({"messages": filtered}, config=config)
         # 提取回复
         result_messages = result.get("messages", [])
         if result_messages:
@@ -257,6 +280,22 @@ def _make_agent_node(agent_chain, agent_name: str):
             reply = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
         else:
             reply = ""
+
+        # ====== 代码层拦截 TOOL_FINISHED ======
+        # 检查 result_messages 中是否有 ToolMessage 包含 TOOL_FINISHED
+        # 如果有，说明 RAG 检索无结果，直接替换最终回答为预设文案
+        has_tool_finished = False
+        for msg in result_messages:
+            if isinstance(msg, ToolMessage) and msg.content.startswith(TOOL_FINISHED_PREFIX):
+                has_tool_finished = True
+                break
+
+        if has_tool_finished:
+            reply = RAG_FALLBACK_MESSAGE
+            # 替换 result_messages 中的最后一条消息
+            if result_messages:
+                result_messages[-1] = AIMessage(content=reply)
+        # ====== 拦截结束 ======
 
         logger.info("Agent %s 回复: %s...", agent_name, reply[:50])
         return {
@@ -324,7 +363,8 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
 重要规则：
 1. 如果用户没有提供车型、年龄、驾龄，请检查对话历史中是否曾经提供过这些信息，如果有则直接使用。
 2. 只有对话历史中也没有这些信息时，才向用户询问。
-3. 请友好、专业地回答。""",
+3. 请友好、专业地回答。
+4. 每次收到新的用户消息，都必须先独立判断是否需要调用工具来获取信息。不能因为历史对话中已有相关信息，就省略工具调用。判断依据是当前问题本身，而不是之前已经查过什么。""",
     )
 
     service_tools = [query_policy, search_insurance_terms, transfer_to_human]
@@ -339,7 +379,8 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
 1. 当用户查询保单时，如果用户没有提供身份证号，请检查对话历史中是否曾经提供过，如果有则直接使用。
 2. 如果对话历史中也没有身份证号，再向用户询问。
 3. 不要重复索要用户已经提供过的信息。
-4. 必要时可转人工。""",
+4. 必要时可转人工。
+5. 每次收到新的用户消息，都必须先独立判断是否需要调用工具来获取信息。不能因为历史对话中已有相关信息，就省略工具调用。判断依据是当前问题本身，而不是之前已经查过什么。""",
     )
 
     # ---------- 构建 StateGraph 编排图 ----------

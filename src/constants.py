@@ -31,3 +31,6 @@ JWT_ALGORITHM = "HS256"
 
 # ---------- API 路径白名单（无需 Token） ----------
 PUBLIC_PATHS = {"/health", "/", "/manifest.json", "/favicon.ico", "/queryToken", "/docs", "/openapi.json"}
+
+# RAG 空结果时的友好回复
+RAG_FALLBACK_MESSAGE = "暂未找到与您问题相匹配的保险条款，建议您转人工客服咨询。我们会为您安排专业人员解答。"

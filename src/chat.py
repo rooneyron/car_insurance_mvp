@@ -22,13 +22,13 @@ logger = get_logger(__name__)
 def _extract_usage(result_dict):
     """从 LangGraph 结果中提取 usage_metadata"""
     if "usage_metadata" in result_dict:
-        return result_dict["usage_metadata"]
+        return result_dict["usage_metadata"] or {}
     if "messages" in result_dict and result_dict["messages"]:
         last_msg = result_dict["messages"][-1]
         if hasattr(last_msg, "usage_metadata"):
-            return last_msg.usage_metadata
+            return last_msg.usage_metadata or {}
         if isinstance(last_msg, dict) and "usage_metadata" in last_msg:
-            return last_msg["usage_metadata"]
+            return last_msg["usage_metadata"] or {}
     return {}
 
 
