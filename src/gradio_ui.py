@@ -24,21 +24,19 @@ def create_gradio_interface():
         msg = gr.Textbox(label="输入消息", placeholder="请输入你的问题...")
         clear = gr.Button("清空对话")
 
-        # 核心响应函数：先显示状态，再显示回复
+        # 核心响应函数（同步，非 generator）
         def respond(message, chat_history, session_id):
+            # 空输入保护：直接返回，不修改任何状态
             if not message or not message.strip():
-                yield "", chat_history, session_id
-                return
+                return message, chat_history, session_id
 
-            # 第一步：立即显示"正在理解问题..."
+            chat_history = chat_history or []
             chat_history.append({"role": "user", "content": message})
-            chat_history.append({"role": "assistant", "content": "🤔 正在理解问题..."})
-            yield "", chat_history, session_id
 
-            # 第二步：调用 chat_api，获取结果
+            # 调用 chat_api
             result = chat_api(session_id, message)
 
-            # 第三步：更新为最终回复
+            # 构建回复
             if result["success"] != 0:
                 final_reply = f"❌ {result.get('error_msg', DEFAULT_ERROR_MESSAGE)}"
             else:
@@ -53,9 +51,8 @@ def create_gradio_interface():
                 # 加上路由标签和耗时
                 final_reply = f"<small>{route_label}  {elapsed_str}</small>\n\n{final_reply}"
 
-            # 替换最后一条 assistant 消息
-            chat_history[-1] = {"role": "assistant", "content": final_reply}
-            yield "", chat_history, session_id
+            chat_history.append({"role": "assistant", "content": final_reply})
+            return "", chat_history, session_id
 
         def _new_session_id():
             return f"gradio_{uuid.uuid4().hex[:12]}"

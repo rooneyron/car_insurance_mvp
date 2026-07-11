@@ -7,7 +7,10 @@ APP_VERSION = "0.1.0"
 SERVICE_NAME = "car_insurance_mvp"
 
 # ---------- RAG 层 ----------
-RAG_EMPTY_RESULT = "未找到相关内容"
+RAG_EMPTY_RESULT = (
+    "检索结果为空。请严格按照以下内容回复用户，不要添加任何额外信息："
+    "'暂未找到相关信息，建议您转人工咨询。'"
+)
 RAG_CHUNK_SIZE = 500
 RAG_CHUNK_OVERLAP = 50
 FAISS_RECALL_TOP_K = 10

@@ -18,6 +18,8 @@ from langgraph.graph.message import add_messages
 from src.constants import RAG_EMPTY_RESULT, TOOL_FINISHED_PREFIX, TRANSFER_SIGNAL
 from src.logger import get_logger
 from src.route_types import Route
+from src.timing_callback import get_timing_handler
+import time
 
 logger = get_logger(__name__)
 
@@ -220,6 +222,7 @@ def _make_route_node():
 
     def route_node(state: GraphState, config: RunnableConfig) -> dict:
         """路由节点：根据用户消息决定走哪个 Agent"""
+        start_time = time.time()
         session_id = config.get("configurable", {}).get("thread_id", "default")
         messages = state.get("messages", [])
         if not messages:
@@ -231,7 +234,8 @@ def _make_route_node():
 
         # 调用路由决策
         route = decide_route(session_id, content)
-        logger.info("图内路由决策: session=%s, route=%s", session_id, route.value)
+        elapsed_ms = (time.time() - start_time) * 1000
+        logger.info("⏱️ route_node: %s, 耗时: %.0fms", route.value, elapsed_ms)
         return {"route": route.value}
 
     return route_node
@@ -284,6 +288,16 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
     # ---------- 创建摘要节点 ----------
     summarization_node = _create_summarization_node(llm)
 
+    def _timed_pre_model_hook(state):
+        """带计时的 SummarizationNode 包装"""
+        start = time.time()
+        result = summarization_node.invoke(state)
+        elapsed_ms = (time.time() - start) * 1000
+        logger.info("⏱️ SummarizationNode 耗时: %.0fms", elapsed_ms)
+        # 写入 timing handler 记录，出现在性能报告中
+        get_timing_handler()._records.append({"label": "SummarizationNode", "ms": elapsed_ms})
+        return result
+
     # ---------- 共享 Memory ----------
     memory = MemorySaver()
 
@@ -292,7 +306,7 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         model=llm,
         tools=[],
         checkpointer=memory,
-        pre_model_hook=lambda state: summarization_node.invoke(state),
+        pre_model_hook=_timed_pre_model_hook,
         prompt="""你是一个友好的车险客服助手。
 
 注意：如果用户透露了个人信息（如身份证号、姓名、车牌号等），请在心里记住这些信息，以便后续其他助手使用。你不需要重复这些信息，但也不要拒绝接收它们。
@@ -304,7 +318,7 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         model=llm,
         tools=sale_tools,
         checkpointer=memory,
-        pre_model_hook=lambda state: summarization_node.invoke(state),
+        pre_model_hook=_timed_pre_model_hook,
         prompt="""你是一个车险售前助手，帮助用户计算保费、推荐投保方案。
 
 重要规则：
@@ -318,7 +332,7 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         model=llm,
         tools=service_tools,
         checkpointer=memory,
-        pre_model_hook=lambda state: summarization_node.invoke(state),
+        pre_model_hook=_timed_pre_model_hook,
         prompt="""你是一个车险售后助手，帮助用户查询保单、解释理赔条款、处理投诉。
 
 重要规则：

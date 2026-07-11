@@ -11,6 +11,7 @@ from src.error_types import ErrorCode, USER_ERROR_MESSAGES, DEFAULT_ERROR_MESSAG
 from src.constants import TRANSFER_SIGNAL, TOOL_FINISHED_PREFIX, TOOL_TRANSFER_NAME, MAX_INPUT_LENGTH, GRAPH_RECURSION_LIMIT
 from src.token_usage import add_tokens, get_today_usage, is_budget_exceeded
 from src.timer import Timer
+from src.timing_callback import get_timing_handler
 from src import state
 from src.logger import get_logger
 from langgraph.errors import GraphRecursionError
@@ -31,10 +32,16 @@ def _extract_usage(result_dict):
     return {}
 
 
-def _check_transfer_flag(result_dict):
-    """检查是否需要转人工"""
+def _check_transfer_flag(result_dict, history_count: int = 0):
+    """
+    检查是否需要转人工。
+    只检查本轮新增的消息（跳过 history_count 之前的历史消息），
+    避免 MemorySaver 持久化的旧信号被重复检测。
+    """
     messages = result_dict.get("messages", [])
-    for msg in messages:
+    # 只检查本轮新增的消息
+    new_messages = messages[history_count:]
+    for msg in new_messages:
         # 检查消息内容中的转人工信号
         if hasattr(msg, 'content') and TRANSFER_SIGNAL in str(msg.content):
             return True
@@ -68,7 +75,18 @@ def _log_token_and_perf(session_id, route, input_tokens, output_tokens, cached_t
         "total_tokens": input_tokens + output_tokens,
         "daily_usage": get_today_usage()
     }, ensure_ascii=False))
-    logger.info("性能日志 - 总耗时: %.0fms\n%s", timer.get_total_ms(), timer.get_report())
+    
+    # 从 timing handler 取 LLM/Tool 细粒度记录
+    handler = get_timing_handler()
+    detail_records = handler.drain_records()
+    
+    report_lines = []
+    for rec in detail_records:
+        report_lines.append(f"  ├── {rec['label']}: {rec['ms']:.0f}ms")
+    # Timer 的粗粒度记录（总耗时、图执行）
+    report_lines.append(timer.get_report())
+    
+    logger.info("性能日志 - 总耗时: %.0fms\n%s", timer.get_total_ms(), "\n".join(report_lines))
 
 
 def _error_response(error_code: ErrorCode):
@@ -85,7 +103,9 @@ def chat_api(session_id: str, message: str) -> dict:
     核心对话接口
     调用 StateGraph 编排图，图内自动完成路由和 Agent 调度。
     """
-    # ---------- 输入长度校验 ----------
+    # ---------- 输入校验 ----------
+    if not message or not message.strip():
+        return _error_response(ErrorCode.INPUT_EMPTY)
     if len(message) > MAX_INPUT_LENGTH:
         return _error_response(ErrorCode.INPUT_TOO_LONG)
 
@@ -98,11 +118,23 @@ def chat_api(session_id: str, message: str) -> dict:
 
     logger.debug("收到消息: %s...", message[:30])
 
-    # 配置：thread_id 用于 Memory 持久化
-    config = {"configurable": {"thread_id": session_id}, "recursion_limit": GRAPH_RECURSION_LIMIT}
+    # 配置：thread_id 用于 Memory 持久化，callbacks 用于性能监控
+    config = {
+        "configurable": {"thread_id": session_id},
+        "recursion_limit": GRAPH_RECURSION_LIMIT,
+        "callbacks": [get_timing_handler()],
+    }
 
     try:
         timer.start("图执行")
+
+        # 获取调用前的历史消息数（用于区分历史和本轮新消息）
+        history_count = 0
+        try:
+            prev_state = state.graph.get_state(config).values
+            history_count = len(prev_state.get("messages", []))
+        except Exception:
+            pass
 
         # 调用编排图（路由 + Agent 调度都在图内完成）
         result = state.graph.invoke(
@@ -125,8 +157,8 @@ def chat_api(session_id: str, message: str) -> dict:
             last_msg = result["messages"][-1]
             reply = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
 
-        # 转人工检查
-        transfer_flag = _check_transfer_flag(result)
+        # 转人工检查（只检查本轮新增消息）
+        transfer_flag = _check_transfer_flag(result, history_count)
 
         # ---------- 提取 Token 使用量（统一处理） ----------
         input_tokens, output_tokens, cached_tokens = _process_usage(result)
