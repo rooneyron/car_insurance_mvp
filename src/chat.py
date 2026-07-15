@@ -8,7 +8,7 @@ import time
 import json
 from src.route_types import Route
 from src.error_types import ErrorCode, USER_ERROR_MESSAGES, DEFAULT_ERROR_MESSAGE
-from src.constants import TRANSFER_SIGNAL, TOOL_FINISHED_PREFIX, TOOL_TRANSFER_NAME, MAX_INPUT_LENGTH, GRAPH_RECURSION_LIMIT
+from src.constants import TRANSFER_SIGNAL, TOOL_TRANSFER_NAME, MAX_INPUT_LENGTH, GRAPH_RECURSION_LIMIT
 from src.token_usage import add_tokens, get_today_usage, is_budget_exceeded
 from src.timer import Timer
 from src.timing_callback import get_timing_handler
@@ -165,19 +165,6 @@ def chat_api(session_id: str, message: str) -> dict:
         timer.stop("总耗时")
         _log_token_and_perf(session_id, route, input_tokens, output_tokens, cached_tokens, timer)
 
-        # ---------- 处理 TOOL_FINISHED 信号 ----------
-        if reply.startswith(TOOL_FINISHED_PREFIX):
-            clean_reply = reply.replace(TOOL_FINISHED_PREFIX, "").strip()
-            return {
-                "success": 0,
-                "content": {
-                    "reply": clean_reply or "暂未找到相关信息，建议转人工咨询。",
-                    "transfer": False,
-                },
-                "route": route.value,
-                "elapsed_ms": timer.get_total_ms(),
-            }
-
         # ---------- 处理转人工 ----------
         if transfer_flag:
             ticket_id = f"TK{int(time.time())}{session_id[-4:]}"
@@ -211,3 +198,112 @@ def chat_api(session_id: str, message: str) -> dict:
     except Exception as e:
         logger.error("chat_api 异常: %s", e, exc_info=True)
         return _error_response(ErrorCode.UNKNOWN)
+
+
+async def chat_api_stream(session_id: str, message: str):
+    """
+    流式对话接口（async generator）
+    逐 token 产出回复文本，供 Gradio 实时展示。
+    yield 的值为 (partial_text: str, metadata: dict | None)
+    """
+    # ---------- 输入校验 ----------
+    if not message or not message.strip():
+        yield _error_response(ErrorCode.INPUT_EMPTY).get("error_msg", ""), {"error": True}
+        return
+    if len(message) > MAX_INPUT_LENGTH:
+        yield _error_response(ErrorCode.INPUT_TOO_LONG).get("error_msg", ""), {"error": True}
+        return
+    if is_budget_exceeded():
+        yield _error_response(ErrorCode.BUDGET_EXCEEDED).get("error_msg", ""), {"error": True}
+        return
+
+    timer = Timer()
+    timer.start("总耗时")
+    logger.debug("[stream] 收到消息: %s...", message[:30])
+
+    config = {
+        "configurable": {"thread_id": session_id},
+        "recursion_limit": GRAPH_RECURSION_LIMIT,
+        "callbacks": [get_timing_handler()],
+    }
+
+    try:
+        full_text = ""
+        current_text = ""
+        has_tool_calls = False
+        route = Route.GENERAL
+
+        try:
+            async for event in state.graph.astream_events(
+                {"messages": [{"role": "user", "content": message}]},
+                config=config,
+                version="v2",
+            ):
+                kind = event.get("event", "")
+
+                # LLM 逐 token 流式输出
+                if kind == "on_chat_model_stream":
+                    chunk = event.get("data", {}).get("chunk")
+                    if chunk and hasattr(chunk, "content") and chunk.content:
+                        if isinstance(chunk.content, str):
+                            current_text += chunk.content
+                            full_text = current_text
+                            yield current_text, None
+
+                # 检测工具调用 —— 清空中间 LLM 文本
+                elif kind == "on_tool_start":
+                    if not has_tool_calls and current_text:
+                        current_text = ""
+                        yield "", None  # 清空 UI
+                    has_tool_calls = True
+
+                # 捕获路由结果
+                elif kind == "on_chain_end":
+                    data = event.get("data", {})
+                    output = data.get("output", {})
+                    if isinstance(output, dict) and "route" in output:
+                        try:
+                            route = Route(output["route"])
+                        except (ValueError, KeyError):
+                            pass
+
+        except GraphRecursionError as e:
+            logger.error("[stream] GraphRecursionError: %s", e, exc_info=True)
+            yield USER_ERROR_MESSAGES.get(ErrorCode.GRAPH_RECURSION_LIMIT, ""), {"error": True}
+            return
+        except Exception as e:
+            logger.error("[stream] 异常: %s", e, exc_info=True)
+            yield USER_ERROR_MESSAGES.get(ErrorCode.UNKNOWN, ""), {"error": True}
+            return
+
+        timer.stop("总耗时")
+        elapsed_ms = timer.get_total_ms()
+
+        # ---------- 后处理 ----------
+        # 转人工信号
+        transfer = False
+        if TRANSFER_SIGNAL in full_text:
+            transfer = True
+            clean = full_text.replace(TRANSFER_SIGNAL, "").strip()
+            ticket_id = f"TK{int(time.time())}{session_id[-4:]}"
+            full_text = (clean or "正在为您转接人工客服，请稍候...")
+            full_text += f"\n\n\u200b\n\n\U0001f504 已为您转接人工客服，工单号：{ticket_id}"
+            current_text = full_text
+
+        # 记录性能日志
+        handler = get_timing_handler()
+        detail_records = handler.drain_records()
+        report_lines = [f"  \u251c\u2500\u2500 {r['label']}: {r['ms']:.0f}ms" for r in detail_records]
+        report_lines.append(timer.get_report())
+        logger.info("[stream] 性能日志 - 总耗时: %.0fms\n%s", elapsed_ms, "\n".join(report_lines))
+
+        metadata = {
+            "route": route.value,
+            "transfer": transfer,
+            "elapsed_ms": elapsed_ms,
+        }
+        yield current_text, metadata
+
+    except Exception as e:
+        logger.error("[stream] 未预期异常: %s", e, exc_info=True)
+        yield USER_ERROR_MESSAGES.get(ErrorCode.UNKNOWN, ""), {"error": True}

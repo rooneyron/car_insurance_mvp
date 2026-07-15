@@ -5,9 +5,8 @@ Gradio 交互界面
 
 import uuid
 import gradio as gr
-from src.route_types import ROUTE_LABELS
-from src.error_types import DEFAULT_ERROR_MESSAGE
-from src.chat import chat_api
+from src.chat import chat_api_stream
+from src.route_types import Route, ROUTE_LABELS
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -24,35 +23,44 @@ def create_gradio_interface():
         msg = gr.Textbox(label="输入消息", placeholder="请输入你的问题...")
         clear = gr.Button("清空对话")
 
-        # 核心响应函数（同步，非 generator）
-        def respond(message, chat_history, session_id):
+        # 流式响应函数（async generator）
+        async def respond(message, chat_history, session_id):
             # 空输入保护：直接返回，不修改任何状态
             if not message or not message.strip():
-                return message, chat_history, session_id
+                yield message, chat_history, session_id
+                return
 
             chat_history = chat_history or []
             chat_history.append({"role": "user", "content": message})
+            # 先显示用户消息 + "正在思考..." 占位
+            chat_history.append({"role": "assistant", "content": "正在思考..."})
+            yield "", chat_history, session_id
 
-            # 调用 chat_api
-            result = chat_api(session_id, message)
+            assistant_idx = len(chat_history) - 1
 
-            # 构建回复
-            if result["success"] != 0:
-                final_reply = f"❌ {result.get('error_msg', DEFAULT_ERROR_MESSAGE)}"
-            else:
-                route = result.get("route", "unknown")
-                route_label = ROUTE_LABELS.get(route, f"🔀 {route}")
-                elapsed_ms = result.get("elapsed_ms", 0)
-                elapsed_str = f"⏱️ {elapsed_ms/1000:.1f}s" if elapsed_ms > 0 else ""
-                final_reply = result["content"]["reply"]
-                if result["content"].get("transfer", False):
-                    ticket_id = result["content"].get("ticket_id", "")
-                    final_reply += f"\n\n🔄 已为您转接人工客服，工单号：{ticket_id}"
-                # 加上路由标签和耗时
-                final_reply = f"<small>{route_label}  {elapsed_str}</small>\n\n{final_reply}"
+            last_metadata = None
+            async for partial_text, metadata in chat_api_stream(session_id, message):
+                if metadata and metadata.get("error"):
+                    chat_history[assistant_idx]["content"] = f"❌ {partial_text}"
+                    yield "", chat_history, session_id
+                    return
+                if metadata:
+                    last_metadata = metadata
+                # 空文本说明工具调用中，显示"正在思考..."
+                if not partial_text:
+                    chat_history[assistant_idx]["content"] = "正在思考..."
+                else:
+                    chat_history[assistant_idx]["content"] = partial_text
+                yield "", chat_history, session_id
 
-            chat_history.append({"role": "assistant", "content": final_reply})
-            return "", chat_history, session_id
+            # 流结束后前置路由标签
+            if last_metadata and last_metadata.get("route"):
+                route = Route(last_metadata["route"])
+                label = ROUTE_LABELS.get(route, "")
+                if label:
+                    current = chat_history[assistant_idx]["content"]
+                    chat_history[assistant_idx]["content"] = f"<small>{label}</small>\n\n{current}"
+                    yield "", chat_history, session_id
 
         def _new_session_id():
             return f"gradio_{uuid.uuid4().hex[:12]}"

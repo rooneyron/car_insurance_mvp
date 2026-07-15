@@ -16,7 +16,7 @@ from langchain_core.runnables import RunnableConfig
 from typing import Optional, TypedDict, Annotated
 from langgraph.graph.message import add_messages
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
-from src.constants import RAG_EMPTY_RESULT, TOOL_FINISHED_PREFIX, TRANSFER_SIGNAL, RAG_FALLBACK_MESSAGE
+from src.constants import RAG_EMPTY_RESULT, TRANSFER_SIGNAL, RAG_NO_RESULT_INSTRUCTION
 from src.logger import get_logger
 from src.route_types import Route
 from src.timing_callback import get_timing_handler
@@ -125,7 +125,7 @@ def search_insurance_terms_logic(query: str) -> str:
             # ====== 本地模式：FAISS + Rerank ======
             results = search_terms(query, top_k=2)
             if not results or results == [RAG_EMPTY_RESULT]:
-                return f"{TOOL_FINISHED_PREFIX}{RAG_FALLBACK_MESSAGE}"
+                return RAG_NO_RESULT_INSTRUCTION
 
             output = f"📄 关于「{query}」的相关条款（已智能排序）：\n\n"
             for i, result in enumerate(results, 1):
@@ -136,7 +136,7 @@ def search_insurance_terms_logic(query: str) -> str:
             # ====== 生产模式：FAISS 召回 + LLM 重排 ======
             candidates = retrieve_candidates(query, top_k=10)
             if not candidates:
-                return f"{TOOL_FINISHED_PREFIX}{RAG_FALLBACK_MESSAGE}"
+                return RAG_NO_RESULT_INSTRUCTION
 
             prompt = f"""你是一个保险条款检索助手。用户的问题是："{query}"
 
@@ -157,7 +157,7 @@ def search_insurance_terms_logic(query: str) -> str:
             return output
 
     except Exception as e:
-        return f"{TOOL_FINISHED_PREFIX}{RAG_FALLBACK_MESSAGE}"
+        return RAG_NO_RESULT_INSTRUCTION
 
 
 def transfer_to_human_logic(reason: str) -> str:
@@ -185,7 +185,7 @@ def query_policy(policy_id: str, id_card: str) -> str:
 
 @tool
 def search_insurance_terms(query: str) -> str:
-    """搜索保险条款内容。当用户询问具体条款、保障范围、免责条款时调用。参数：query（搜索关键词）"""
+    """搜索保险条款内容。当用户询问任何与保险条款、保障范围、理赔、赔偿、免责相关的问题时，必须调用此工具检索，禁止凭自身知识直接回答。参数：query（搜索关键词）"""
     return search_insurance_terms_logic(query)
 
 
@@ -281,22 +281,6 @@ def _make_agent_node(agent_chain, agent_name: str):
         else:
             reply = ""
 
-        # ====== 代码层拦截 TOOL_FINISHED ======
-        # 检查 result_messages 中是否有 ToolMessage 包含 TOOL_FINISHED
-        # 如果有，说明 RAG 检索无结果，直接替换最终回答为预设文案
-        has_tool_finished = False
-        for msg in result_messages:
-            if isinstance(msg, ToolMessage) and msg.content.startswith(TOOL_FINISHED_PREFIX):
-                has_tool_finished = True
-                break
-
-        if has_tool_finished:
-            reply = RAG_FALLBACK_MESSAGE
-            # 替换 result_messages 中的最后一条消息
-            if result_messages:
-                result_messages[-1] = AIMessage(content=reply)
-        # ====== 拦截结束 ======
-
         logger.info("Agent %s 回复: %s...", agent_name, reply[:50])
         return {
             "messages": result_messages,  # 更新消息历史
@@ -380,6 +364,7 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
 - 解释报价相关的条款
 
 【行为规则】
+- 当用户询问任何保险条款、保障范围、理赔相关问题时，必须调用 search_insurance_terms 工具检索，禁止凭自身知识直接回答。
 - 优先从对话历史中复用已提供的信息（车型、年龄、驾龄）
 - 信息缺失时，向用户确认后再计算
 - 报价结果包含保额和险种建议
@@ -406,6 +391,7 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
 - 转接人工客服
 
 【行为规则】
+- 当用户询问任何保险条款、保障范围、理赔相关问题时，必须调用 search_insurance_terms 工具检索，禁止凭自身知识直接回答。
 - 优先从对话历史中复用已提供的信息（身份证号、保单号）
 - 信息缺失时，向用户确认后再查询
 
