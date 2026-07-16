@@ -16,7 +16,7 @@ from langchain_core.runnables import RunnableConfig
 from typing import Optional, TypedDict, Annotated
 from langgraph.graph.message import add_messages
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
-from src.constants import RAG_EMPTY_RESULT, TRANSFER_SIGNAL, RAG_NO_RESULT_INSTRUCTION
+from src.constants import RAG_EMPTY_RESULT, TRANSFER_SIGNAL
 from src.logger import get_logger
 from src.route_types import Route
 from src.timing_callback import get_timing_handler
@@ -125,7 +125,7 @@ def search_insurance_terms_logic(query: str) -> str:
             # ====== 本地模式：FAISS + Rerank ======
             results = search_terms(query, top_k=2)
             if not results or results == [RAG_EMPTY_RESULT]:
-                return RAG_NO_RESULT_INSTRUCTION
+                return "未检索到相关保险条款。"
 
             output = f"📄 关于「{query}」的相关条款（已智能排序）：\n\n"
             for i, result in enumerate(results, 1):
@@ -136,7 +136,7 @@ def search_insurance_terms_logic(query: str) -> str:
             # ====== 生产模式：FAISS 召回 + LLM 重排 ======
             candidates = retrieve_candidates(query, top_k=10)
             if not candidates:
-                return RAG_NO_RESULT_INSTRUCTION
+                return "未检索到相关保险条款。"
 
             prompt = f"""你是一个保险条款检索助手。用户的问题是："{query}"
 
@@ -157,7 +157,7 @@ def search_insurance_terms_logic(query: str) -> str:
             return output
 
     except Exception as e:
-        return RAG_NO_RESULT_INSTRUCTION
+        return "未检索到相关保险条款。"
 
 
 def transfer_to_human_logic(reason: str) -> str:
@@ -185,7 +185,7 @@ def query_policy(policy_id: str, id_card: str) -> str:
 
 @tool
 def search_insurance_terms(query: str) -> str:
-    """搜索保险条款内容。当用户询问任何与保险条款、保障范围、理赔、赔偿、免责相关的问题时，必须调用此工具检索，禁止凭自身知识直接回答。参数：query（搜索关键词）"""
+    """查询保险条款。当用户询问保险条款相关问题时，必须调用此工具检索，禁止凭自身知识直接回答。参数：query（搜索关键词）"""
     return search_insurance_terms_logic(query)
 
 
@@ -364,7 +364,7 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
 - 解释报价相关的条款
 
 【行为规则】
-- 当用户询问任何保险条款、保障范围、理赔相关问题时，必须调用 search_insurance_terms 工具检索，禁止凭自身知识直接回答。
+- 当用户询问保险条款相关问题时，必须调用 search_insurance_terms 工具检索，禁止凭自身知识直接回答。
 - 优先从对话历史中复用已提供的信息（车型、年龄、驾龄）
 - 信息缺失时，向用户确认后再计算
 - 报价结果包含保额和险种建议
@@ -383,15 +383,15 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         checkpointer=memory,
         pre_model_hook=_timed_pre_model_hook,
         prompt="""【角色定义】
-你是一个车险售后助手，帮助用户处理保单查询、理赔条款解释和投诉转接。
+你是一个车险售后助手，帮助用户处理保单查询、保险条款查询和投诉转接。
 
 【职责边界】
 - 查询保单信息
-- 解释理赔相关条款
+- 解释保险条款
 - 转接人工客服
 
 【行为规则】
-- 当用户询问任何保险条款、保障范围、理赔相关问题时，必须调用 search_insurance_terms 工具检索，禁止凭自身知识直接回答。
+- 当用户询问保险条款相关问题时，必须调用 search_insurance_terms 工具检索，禁止凭自身知识直接回答。
 - 优先从对话历史中复用已提供的信息（身份证号、保单号）
 - 信息缺失时，向用户确认后再查询
 
