@@ -1,0 +1,26 @@
+车险智能客服 MVP — 项目介绍
+================================
+
+1. 项目定位
+基于 LangGraph + RAG 的车险智能客服 MVP，验证了多轮对话、工具调用、公网部署的全链路可行性。
+
+2. 技术架构
+FastAPI 接入口 → Gradio 交互界面 → LangGraph StateGraph 工作流编排 → 3 个 Agent 节点（general/sale/service）→ RAG 检索（FAISS + FastEmbed + LLM 重排）→ 工具层解耦。
+
+3. 工作流与路由
+StateGraph 条件边实现三级路由：关键词扫描 → 会话意图复用 → LLM 兜底分类。关键词配置化，业务方可热修改。
+
+4. 工具调用
+封装 3 个业务工具：算保费、查保单、RAG 条款检索、转人工。工具与 Agent 解耦，历史工具记录被过滤以强制每次重新调用，参数支持从对话历史复用，不重复索要用户已提供信息。
+
+5. 部署与适配
+部署在 Render 免费实例（512MB）：FastEmbed 替换 sentence-transformers（800MB→300MB），LLM 重排替代 1.1GB 本地 Rerank，JWT + 日限额控制成本，Docker 容器化。
+
+6. 上下文与记忆
+MemorySaver 管理跨轮记忆，SummarizationNode 在 2000 token 时触发摘要压缩至 500 token。空输入和超长输入（1000 字符）在入口处拦截，零 token 消耗。
+
+7. 评估与优化
+RAGAS 评估：Faithfulness 0.98 / Context Precision 0.97，Answer Relevancy 从 0.58 优化至 0.81。Rerank 阈值 0.8 通过 .env 配置。RAG 空结果时工具返回简单提示，LLM 自行判断并自然回答（如"太空飞船不在车险范围"），不再强制输出预设文案。
+
+8. 工程实践
+4 层 15 个错误码体系、每次 LLM/Tool 调用独立计时日志、Token 用量 JSON 日志、Prompt 打印供调试验证、转人工信号增量检测避免重复触发。Session 级内存锁（threading.Lock + 非阻塞 acquire）覆盖 API 和 Gradio 双入口，防止同一会话并发请求导致 MemorySaver 写竞态。流式输出采用文本缓冲机制，LLM 首次输出先缓冲，确认无工具调用后再显示，消除工具调用场景下的中间文本闪烁。
