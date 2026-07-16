@@ -6,6 +6,7 @@
 
 import time
 import json
+import threading
 from src.route_types import Route
 from src.error_types import ErrorCode, USER_ERROR_MESSAGES, DEFAULT_ERROR_MESSAGE
 from src.constants import TRANSFER_SIGNAL, TOOL_TRANSFER_NAME, MAX_INPUT_LENGTH, GRAPH_RECURSION_LIMIT
@@ -17,6 +18,33 @@ from src.logger import get_logger
 from langgraph.errors import GraphRecursionError
 
 logger = get_logger(__name__)
+
+
+# ============================================================
+# Session 内存锁：防止同一 session 并发请求
+# ============================================================
+_session_locks = {}          # session_id -> threading.Lock
+_session_locks_guard = threading.Lock()  # 保护 dict 的元锁
+
+
+def _try_acquire_session_lock(session_id: str) -> bool:
+    """尝试获取 session 锁，返回是否成功（非阻塞）"""
+    with _session_locks_guard:
+        if session_id not in _session_locks:
+            _session_locks[session_id] = threading.Lock()
+        lock = _session_locks[session_id]
+    return lock.acquire(blocking=False)
+
+
+def _release_session_lock(session_id: str):
+    """释放 session 锁并清理"""
+    with _session_locks_guard:
+        lock = _session_locks.pop(session_id, None)
+    if lock is not None:
+        try:
+            lock.release()
+        except RuntimeError:
+            pass  # 已经释放
 
 
 def _extract_usage(result_dict):
@@ -103,6 +131,18 @@ def chat_api(session_id: str, message: str) -> dict:
     核心对话接口
     调用 StateGraph 编排图，图内自动完成路由和 Agent 调度。
     """
+    # ---------- Session 并发锁 ----------
+    if not _try_acquire_session_lock(session_id):
+        return _error_response(ErrorCode.SESSION_BUSY)
+
+    try:
+        return _chat_api_inner(session_id, message)
+    finally:
+        _release_session_lock(session_id)
+
+
+def _chat_api_inner(session_id: str, message: str) -> dict:
+    """chat_api 内部实现（已持有 session 锁）"""
     # ---------- 输入校验 ----------
     if not message or not message.strip():
         return _error_response(ErrorCode.INPUT_EMPTY)
@@ -206,6 +246,20 @@ async def chat_api_stream(session_id: str, message: str):
     逐 token 产出回复文本，供 Gradio 实时展示。
     yield 的值为 (partial_text: str, metadata: dict | None)
     """
+    # ---------- Session 并发锁 ----------
+    if not _try_acquire_session_lock(session_id):
+        yield USER_ERROR_MESSAGES.get(ErrorCode.SESSION_BUSY, ""), {"error": True}
+        return
+
+    try:
+        async for item in _chat_api_stream_inner(session_id, message):
+            yield item
+    finally:
+        _release_session_lock(session_id)
+
+
+async def _chat_api_stream_inner(session_id: str, message: str):
+    """chat_api_stream 内部实现（已持有 session 锁）"""
     # ---------- 输入校验 ----------
     if not message or not message.strip():
         yield _error_response(ErrorCode.INPUT_EMPTY).get("error_msg", ""), {"error": True}
@@ -232,6 +286,7 @@ async def chat_api_stream(session_id: str, message: str):
         current_text = ""
         has_tool_calls = False
         route = Route.GENERAL
+        text_buffer = ""  # 缓冲 LLM 文本，防止工具调用时闪烁
 
         try:
             async for event in state.graph.astream_events(
@@ -244,18 +299,41 @@ async def chat_api_stream(session_id: str, message: str):
                 # LLM 逐 token 流式输出
                 if kind == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
-                    if chunk and hasattr(chunk, "content") and chunk.content:
-                        if isinstance(chunk.content, str):
-                            current_text += chunk.content
-                            full_text = current_text
-                            yield current_text, None
+                    if chunk:
+                        # 检查是否包含 tool_calls（LLM 决定调用工具）
+                        tool_call_chunks = getattr(chunk, 'tool_call_chunks', None)
+                        if tool_call_chunks:
+                            # 工具调用开始，丢弃缓冲文本
+                            has_tool_calls = True
+                            text_buffer = ""
+                            current_text = ""
+                        elif chunk.content and isinstance(chunk.content, str):
+                            if has_tool_calls:
+                                # 工具调用后的新 LLM 输出，直接流式显示
+                                current_text += chunk.content
+                                full_text = current_text
+                                yield current_text, None
+                            else:
+                                # 首次 LLM 输出，缓冲（可能后续会调工具）
+                                text_buffer += chunk.content
 
-                # 检测工具调用 —— 清空中间 LLM 文本
+                # 工具调用执行中（丢弃缓冲）
                 elif kind == "on_tool_start":
-                    if not has_tool_calls and current_text:
-                        current_text = ""
-                        yield "", None  # 清空 UI
+                    text_buffer = ""
+                    current_text = ""
                     has_tool_calls = True
+
+                # LLM 单轮结束
+                elif kind == "on_chat_model_end":
+                    if text_buffer and not has_tool_calls:
+                        # 没有工具调用，输出缓冲文本
+                        current_text = text_buffer
+                        full_text = text_buffer
+                        text_buffer = ""
+                        yield current_text, None
+                    elif has_tool_calls:
+                        # 工具调用后的 LLM 结束，重置缓冲
+                        text_buffer = ""
 
                 # 捕获路由结果
                 elif kind == "on_chain_end":
