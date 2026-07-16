@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-gradio
+gradio==6.19.0
 python-dotenv
 PyJWT
 langchain
