@@ -5,6 +5,8 @@
 
 import logging
 import sys
+from src.logging_filters import TraceIdFilter
+
 
 def setup_logging(level: str = "INFO"):
     """
@@ -13,20 +15,19 @@ def setup_logging(level: str = "INFO"):
     log_level = getattr(logging, level.upper(), logging.INFO)
 
     formatter = logging.Formatter(
-        fmt="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+        fmt="%(asctime)s | %(levelname)-7s | [%(trace_id)s] %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
+    handler.addFilter(TraceIdFilter())
 
     root = logging.getLogger()
     root.setLevel(log_level)
-    # 避免重复添加 handler
     if not root.handlers:
         root.addHandler(handler)
 
 
-# 模块级 logger，各模块通过 get_logger 获取自己的 logger
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)

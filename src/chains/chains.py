@@ -15,7 +15,6 @@ from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 from typing import Optional, TypedDict, Annotated
 from langgraph.graph.message import add_messages
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from src.constants import RAG_EMPTY_RESULT, TRANSFER_SIGNAL
 from src.logger import get_logger
 from src.route_types import Route
@@ -249,30 +248,8 @@ def _make_agent_node(agent_chain, agent_name: str):
         messages = state.get("messages", [])
         logger.info("执行 Agent 节点: %s", agent_name)
 
-        # ---------- 压缩上下文：移除历史的工具调用记录 ----------
-        # 跳过带 tool_calls 的 AIMessage 和所有连续的 ToolMessage
-        # 保留 HumanMessage 和普通 AIMessage（对话上下文）
-        filtered = []
-        skip_tool = False
-        for msg in messages:
-            if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                skip_tool = True
-                continue
-            if skip_tool and msg.type == "tool":
-                continue  # 继续跳过，不重置标记（支持多条 ToolMessage）
-            skip_tool = False  # 遇到非 ToolMessage 才重置
-            filtered.append(msg)
-
-        # 如果过滤后消息列表为空或只有 System Prompt，插入一条占位消息
-        # 避免消息链断裂导致 LLM 困惑
-        if len(filtered) <= 1:
-            filtered.insert(0, SystemMessage(
-                content="系统提示：历史对话中已执行过工具调用，结果已整合到对话中。"
-            ))
-        # ---------- 压缩上下文结束 ----------
-
-        # 调用子 Agent（create_react_agent），传入压缩后的消息
-        result = agent_chain.invoke({"messages": filtered}, config=config)
+        # 调用子 Agent（create_react_agent），传入完整消息历史
+        result = agent_chain.invoke({"messages": messages}, config=config)
         # 提取回复
         result_messages = result.get("messages", [])
         if result_messages:

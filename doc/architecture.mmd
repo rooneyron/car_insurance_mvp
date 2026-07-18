@@ -9,7 +9,7 @@ graph TB
     end
 
     subgraph LangGraph StateGraph
-        D["route_node<br/>src/core/routing.py<br/>关键词匹配 → 意图继承 → LLM兜底"]
+        D["route_node<br/>src/core/routing.py<br/>关键词匹配 → 意图继承 → 轻量级小模型意图识别"]
         E["general_node<br/>闲聊/信息收集"]
         F["sale_node<br/>售前 Agent"]
         G["service_node<br/>售后 Agent"]

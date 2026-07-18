@@ -63,7 +63,7 @@ def keyword_scan(message: str) -> Optional[Route]:
             return Route.SALE
     return None
 
-# ---------- 4. LLM 分类兜底（模拟版） ----------
+# ---------- 4. 轻量级小模型意图识别（模拟版） ----------
 def llm_classify(message: str) -> Route:
     """
     目前是模拟逻辑。真实实现会调用 deepseek-chat。

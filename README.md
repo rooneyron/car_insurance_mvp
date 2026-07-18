@@ -8,7 +8,7 @@
 
 - ✅ 路由决策模块（关键词配置化）
 
-- ✅ 三级路由策略（关键词 → LLM 兜底 → 会话状态复用）
+- ✅ 三级路由策略（关键词 → 轻量级小模型意图识别 → 会话状态复用）
 
 - ✅ 三个 Chain（普通链 / 报价链 / 理赔链）
 
@@ -32,6 +32,12 @@
 
 - ✅ RAGAS 质量评估（15 条测试集 + 4 大指标量化 RAG 链路质量）
 
+- ✅ 全链路 trace_id 日志追踪（contextvars + logging Filter 自动注入）
+
+- ✅ JWT 有效期前端展示（页面顶部显示 Token 到期时间）
+
+- ✅ Git 版本控制（功能分支开发 + 结构化提交）
+
 ## 技术栈
 
 - Python 3\.12\+
@@ -52,7 +58,7 @@
 
 |功能|说明|
 |---|---|
-|路由决策|关键词优先 \+ 会话状态复用 \+ LLM 兜底|
+|路由决策|关键词优先 \+ 会话状态复用 \+ 轻量级小模型意图识别|
 |跨轮记忆|支持多轮对话上下文记忆，自动摘要压缩|
 |RAG 检索|FAISS 向量检索 \+ FastEmbed 轻量级 Embedding|
 |工具调用|保费计算、保单查询、转人工|
@@ -130,6 +136,8 @@ car_insurance_mvp/
 │   ├── rag.py             # RAG 检索（FAISS + BGE-Reranker）
 │   ├── state.py           # LangGraph 状态定义
 │   ├── logger.py          # 统一日志配置
+│   ├── context.py         # trace_id contextvars 存储
+│   ├── logging_filters.py # 日志 Filter（注入 trace_id）
 │   ├── token_usage.py     # Token 统计与限额
 │   ├── constants.py       # 跨模块常量
 │   ├── error_types.py     # 错误码与用户提示
@@ -167,6 +175,10 @@ car_insurance_mvp/
 
 - 接入 RAGAS 评估框架，基于 15 条人工测试集量化 RAG 链路质量，faithfulness 0.98 / context_precision 0.97
 
+- 实现全链路 trace_id 日志追踪，基于 contextvars + logging Filter，业务代码零侵入
+
+- 采用 Git 功能分支工作流（feature/\*），结构化提交信息，便于代码审查与版本回溯
+
 ## 演示注意事项
 
 - Render 免费实例 15 分钟无访问后自动休眠，再次访问唤醒耗时约 30\-60 秒
@@ -181,4 +193,4 @@ car_insurance_mvp/
 
 项目命名、核心技术难题的解决，均离不开相关技术助力。
 
-2026\.07\.10
+2026\.07\.18

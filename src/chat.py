@@ -6,8 +6,10 @@
 
 import time
 import json
+import uuid
 import threading
 from src.route_types import Route
+from src.context import set_trace_id
 from src.error_types import ErrorCode, USER_ERROR_MESSAGES, DEFAULT_ERROR_MESSAGE
 from src.constants import TRANSFER_SIGNAL, TOOL_TRANSFER_NAME, MAX_INPUT_LENGTH, GRAPH_RECURSION_LIMIT
 from src.token_usage import add_tokens, get_today_usage, is_budget_exceeded
@@ -131,6 +133,10 @@ def chat_api(session_id: str, message: str) -> dict:
     核心对话接口
     调用 StateGraph 编排图，图内自动完成路由和 Agent 调度。
     """
+    # 设置 trace_id（API 入口）
+    trace_id = f"TR{int(time.time() * 1000)}{uuid.uuid4().hex[:4]}"
+    set_trace_id(trace_id)
+
     # ---------- Session 并发锁 ----------
     if not _try_acquire_session_lock(session_id):
         return _error_response(ErrorCode.SESSION_BUSY)
@@ -246,6 +252,10 @@ async def chat_api_stream(session_id: str, message: str):
     逐 token 产出回复文本，供 Gradio 实时展示。
     yield 的值为 (partial_text: str, metadata: dict | None)
     """
+    # 设置 Trace_id（流式入口）
+    trace_id = f"TR{int(time.time() * 1000)}{uuid.uuid4().hex[:4]}"
+    set_trace_id(trace_id)
+
     # ---------- Session 并发锁 ----------
     if not _try_acquire_session_lock(session_id):
         yield USER_ERROR_MESSAGES.get(ErrorCode.SESSION_BUSY, ""), {"error": True}
@@ -285,6 +295,7 @@ async def _chat_api_stream_inner(session_id: str, message: str):
         full_text = ""
         current_text = ""
         has_tool_calls = False
+        transfer_detected = False  # 检测转人工工具调用
         route = Route.GENERAL
         text_buffer = ""  # 缓冲 LLM 文本，防止工具调用时闪烁
 
@@ -319,6 +330,9 @@ async def _chat_api_stream_inner(session_id: str, message: str):
 
                 # 工具调用执行中（丢弃缓冲）
                 elif kind == "on_tool_start":
+                    tool_name = event.get("name", "")
+                    if tool_name == TOOL_TRANSFER_NAME:
+                        transfer_detected = True
                     text_buffer = ""
                     current_text = ""
                     has_tool_calls = True
@@ -358,15 +372,14 @@ async def _chat_api_stream_inner(session_id: str, message: str):
         elapsed_ms = timer.get_total_ms()
 
         # ---------- 后处理 ----------
-        # 转人工信号
+        # 转人工信号（基于工具调用检测）
         transfer = False
-        if TRANSFER_SIGNAL in full_text:
+        if transfer_detected:
             transfer = True
-            clean = full_text.replace(TRANSFER_SIGNAL, "").strip()
             ticket_id = f"TK{int(time.time())}{session_id[-4:]}"
-            full_text = (clean or "正在为您转接人工客服，请稍候...")
-            full_text += f"\n\n\u200b\n\n\U0001f504 已为您转接人工客服，工单号：{ticket_id}"
-            current_text = full_text
+            # 追加转人工提示和工单号
+            current_text += f"\n\n\u200b\n\n\U0001f504 已为您转接人工客服，工单号：{ticket_id}"
+            full_text = current_text
 
         # 记录性能日志
         handler = get_timing_handler()

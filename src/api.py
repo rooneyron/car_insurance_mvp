@@ -154,12 +154,12 @@ def create_app() -> FastAPI:
         if path == "/openapi.json":
             return await call_next(request)
 
-        # 放行所有以 /gradio/ 开头的子资源（静态文件、API 等）
-        if path.startswith("/gradio/"):
+        # 放行所有以 /gradio/ 开头的子资源（静态文件、API 等），但 /gradio/ 页面本身需要 token
+        if path.startswith("/gradio/") and path != "/gradio/":
             return await call_next(request)
 
-        # /gradio 页面本身需要 token
-        if path == "/gradio":
+        # /gradio 和 /gradio/ 页面需要 token
+        if path in ("/gradio", "/gradio/"):
             token = request.query_params.get("token")
             if not token:
                 return JSONResponse(status_code=401, content={"detail": "Missing token"})

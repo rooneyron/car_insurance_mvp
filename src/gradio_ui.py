@@ -40,6 +40,9 @@ def create_gradio_interface():
     with gr.Blocks(title="车险智能客服 MVP") as demo:
         gr.Markdown("# 🚗 车险智能客服 MVP")
         gr.Markdown("基于路由决策 + LangChain 构建")
+        
+        # Token 有效期显示
+        token_expiry_md = gr.HTML('<div id="token-expiry" style="display:none; color:#666; font-size:0.9em;"></div>', visible=True)
 
         # 状态
         session_state = gr.State(value="")
@@ -148,10 +151,32 @@ def create_gradio_interface():
         # ============================================================
         
         # 页面加载时生成 session_id
-        demo.load(lambda: _new_session_id(), None, session_state)
+        demo.load(_new_session_id, None, session_state)
 
-        # 注入 tooltip JavaScript（js_on_load 设置按钮 title 属性）
+        # 注入 tooltip JavaScript 和 token 有效期显示
         tooltip_js = ""
+        # Token 有效期显示
+        tooltip_js += """
+        (function(){
+            var params = new URLSearchParams(window.location.search);
+            var token = params.get('token');
+            if(token){
+                try{
+                    var parts = token.split('.');
+                    var payload = JSON.parse(atob(parts[1]));
+                    if(payload.exp){
+                        var expDate = new Date(payload.exp * 1000);
+                        var expStr = expDate.toLocaleString('zh-CN', {year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+                        var md = document.querySelector('#token-expiry');
+                        if(md){
+                            md.innerHTML = '🔑 Token 有效期至: ' + expStr;
+                            md.style.display = 'block';
+                        }
+                    }
+                }catch(e){console.error('Token parse error:', e);}
+            }
+        })();
+        """
         for i, (_, _, tooltip) in enumerate(GROUP_A):
             escaped = tooltip.replace('\\', '\\\\').replace('"', '\\"')
             tooltip_js += f'var b=document.getElementById("demo_a_{i}");if(b)b.title="{escaped}";'
