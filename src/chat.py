@@ -14,7 +14,7 @@ from src.error_types import ErrorCode, USER_ERROR_MESSAGES, DEFAULT_ERROR_MESSAG
 from src.constants import TRANSFER_SIGNAL, TOOL_TRANSFER_NAME, MAX_INPUT_LENGTH, GRAPH_RECURSION_LIMIT
 from src.token_usage import add_tokens, get_today_usage, is_budget_exceeded
 from src.timer import Timer
-from src.timing_callback import get_timing_handler
+from src.timing_callback import create_timing_handler
 from src import state
 from src.logger import get_logger
 from langgraph.errors import GraphRecursionError
@@ -93,7 +93,7 @@ def _process_usage(result):
     return input_tokens, output_tokens, cached_tokens
 
 
-def _log_token_and_perf(session_id, route, input_tokens, output_tokens, cached_tokens, timer):
+def _log_token_and_perf(session_id, route, input_tokens, output_tokens, cached_tokens, timer, handler):
     """统一记录 Token 和性能日志"""
     logger.info("Token日志: %s", json.dumps({
         "timestamp": time.time(),
@@ -107,7 +107,6 @@ def _log_token_and_perf(session_id, route, input_tokens, output_tokens, cached_t
     }, ensure_ascii=False))
     
     # 从 timing handler 取 LLM/Tool 细粒度记录
-    handler = get_timing_handler()
     detail_records = handler.drain_records()
     
     report_lines = []
@@ -165,20 +164,27 @@ def _chat_api_inner(session_id: str, message: str) -> dict:
     logger.debug("收到消息: %s...", message[:30])
 
     # 配置：thread_id 用于 Memory 持久化，callbacks 用于性能监控
+    timing_handler = create_timing_handler()
     config = {
         "configurable": {"thread_id": session_id},
         "recursion_limit": GRAPH_RECURSION_LIMIT,
-        "callbacks": [get_timing_handler()],
+        "callbacks": [timing_handler],
     }
 
     try:
         timer.start("图执行")
 
-        # 获取调用前的历史消息数（用于区分历史和本轮新消息）
+        # ---------- 入口摘要：在进入图之前压缩历史消息 ----------
         history_count = 0
         try:
             prev_state = state.graph.get_state(config).values
-            history_count = len(prev_state.get("messages", []))
+            messages = list(prev_state.get("messages", []))
+            if messages and state.summarize_fn:
+                summarized = state.summarize_fn({"messages": messages})
+                state.graph.update_state(config, summarized)
+                history_count = len(summarized.get("messages", []))
+            else:
+                history_count = len(messages)
         except Exception:
             pass
 
@@ -209,7 +215,7 @@ def _chat_api_inner(session_id: str, message: str) -> dict:
         # ---------- 提取 Token 使用量（统一处理） ----------
         input_tokens, output_tokens, cached_tokens = _process_usage(result)
         timer.stop("总耗时")
-        _log_token_and_perf(session_id, route, input_tokens, output_tokens, cached_tokens, timer)
+        _log_token_and_perf(session_id, route, input_tokens, output_tokens, cached_tokens, timer, timing_handler)
 
         # ---------- 处理转人工 ----------
         if transfer_flag:
@@ -285,13 +291,24 @@ async def _chat_api_stream_inner(session_id: str, message: str):
     timer.start("总耗时")
     logger.debug("[stream] 收到消息: %s...", message[:30])
 
+    timing_handler = create_timing_handler()
     config = {
         "configurable": {"thread_id": session_id},
         "recursion_limit": GRAPH_RECURSION_LIMIT,
-        "callbacks": [get_timing_handler()],
+        "callbacks": [timing_handler],
     }
 
     try:
+        # ---------- 入口摘要：在进入图之前压缩历史消息 ----------
+        try:
+            prev_state = state.graph.get_state(config).values
+            messages = list(prev_state.get("messages", []))
+            if messages and state.summarize_fn:
+                summarized = state.summarize_fn({"messages": messages})
+                state.graph.update_state(config, summarized)
+        except Exception:
+            pass
+
         full_text = ""
         current_text = ""
         has_tool_calls = False
@@ -339,6 +356,14 @@ async def _chat_api_stream_inner(session_id: str, message: str):
 
                 # LLM 单轮结束
                 elif kind == "on_chat_model_end":
+                    # 检测文本中的转人工信号（流式 chunk 可能切断信号词，在累积文本中检查）
+                    if text_buffer and TRANSFER_SIGNAL in text_buffer:
+                        transfer_detected = True
+                        text_buffer = text_buffer.replace(TRANSFER_SIGNAL, "")
+                    if has_tool_calls and current_text and TRANSFER_SIGNAL in current_text:
+                        transfer_detected = True
+                        current_text = current_text.replace(TRANSFER_SIGNAL, "")
+
                     if text_buffer and not has_tool_calls:
                         # 没有工具调用，输出缓冲文本
                         current_text = text_buffer
@@ -382,8 +407,7 @@ async def _chat_api_stream_inner(session_id: str, message: str):
             full_text = current_text
 
         # 记录性能日志
-        handler = get_timing_handler()
-        detail_records = handler.drain_records()
+        detail_records = timing_handler.drain_records()
         report_lines = [f"  \u251c\u2500\u2500 {r['label']}: {r['ms']:.0f}ms" for r in detail_records]
         report_lines.append(timer.get_report())
         logger.info("[stream] 性能日志 - 总耗时: %.0fms\n%s", elapsed_ms, "\n".join(report_lines))

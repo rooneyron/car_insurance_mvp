@@ -123,13 +123,6 @@ class TimingCallbackHandler(BaseCallbackHandler):
         return records
 
 
-# 全局单例（供各 Agent 共享）
-_timing_handler = None
-
-
-def get_timing_handler() -> TimingCallbackHandler:
-    """获取全局 TimingCallbackHandler 实例"""
-    global _timing_handler
-    if _timing_handler is None:
-        _timing_handler = TimingCallbackHandler()
-    return _timing_handler
+def create_timing_handler() -> TimingCallbackHandler:
+    """创建新的 TimingCallbackHandler 实例（每次请求独立）"""
+    return TimingCallbackHandler()

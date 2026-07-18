@@ -18,7 +18,6 @@ from langgraph.graph.message import add_messages
 from src.constants import RAG_EMPTY_RESULT, TRANSFER_SIGNAL
 from src.logger import get_logger
 from src.route_types import Route
-from src.timing_callback import get_timing_handler
 import time
 
 logger = get_logger(__name__)
@@ -288,15 +287,9 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
     # ---------- 创建摘要节点 ----------
     summarization_node = _create_summarization_node(llm)
 
-    def _timed_pre_model_hook(state):
-        """带计时的 SummarizationNode 包装"""
-        start = time.time()
-        result = summarization_node.invoke(state)
-        elapsed_ms = (time.time() - start) * 1000
-        logger.info("⏱️ SummarizationNode 耗时: %.0fms", elapsed_ms)
-        # 写入 timing handler 记录，出现在性能报告中
-        get_timing_handler()._records.append({"label": "SummarizationNode", "ms": elapsed_ms})
-        return result
+    # 导出摘要函数到全局 state（供 chat.py 入口调用）
+    from src.state import set_summarize_fn
+    set_summarize_fn(lambda state: summarization_node.invoke(state))
 
     # ---------- 共享 Memory ----------
     memory = MemorySaver()
@@ -306,7 +299,6 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         model=llm,
         tools=[],
         checkpointer=memory,
-        pre_model_hook=_timed_pre_model_hook,
         prompt="""【角色定义】
 你是一个友好的车险客服助手，负责承接用户的初始咨询。
 
@@ -331,7 +323,6 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         model=llm,
         tools=sale_tools,
         checkpointer=memory,
-        pre_model_hook=_timed_pre_model_hook,
         prompt="""【角色定义】
 你是一个车险售前助手，帮助用户计算保费和推荐投保方案。
 
@@ -358,7 +349,6 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         model=llm,
         tools=service_tools,
         checkpointer=memory,
-        pre_model_hook=_timed_pre_model_hook,
         prompt="""【角色定义】
 你是一个车险售后助手，帮助用户处理保单查询、保险条款查询和投诉转接。
 
