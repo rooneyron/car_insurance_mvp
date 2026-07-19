@@ -10,7 +10,6 @@ class ErrorCode(str, Enum):
     
     # RAG 层
     FAISS_LOAD_FAILED = "FAISS_LOAD_FAILED"
-    RAG_EMPTY_RESULT = "RAG_EMPTY_RESULT"
     RERANK_LOAD_FAILED = "RERANK_LOAD_FAILED"
     RERANK_TIMEOUT = "RERANK_TIMEOUT"
     RAG_SCORE_LOW = "RAG_SCORE_LOW"
@@ -32,7 +31,6 @@ USER_ERROR_MESSAGES = {
     ErrorCode.API_NETWORK_ERROR: "网络连接异常，请稍后再试",
     ErrorCode.API_UNKNOWN: "系统服务暂时不可用，请稍后再试",
     ErrorCode.FAISS_LOAD_FAILED: "知识库暂时无法访问，已为您切换到基础模式",
-    ErrorCode.RAG_EMPTY_RESULT: "未找到相关条款，已为您切换到基础模式",
     ErrorCode.RERANK_LOAD_FAILED: "知识库暂时无法访问，已为您切换到基础模式",
     ErrorCode.RERANK_TIMEOUT: "检索超时，已为您切换到基础模式",
     ErrorCode.RAG_SCORE_LOW: "未找到足够相关的条款，已为您切换到基础模式",

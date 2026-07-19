@@ -14,25 +14,25 @@ logger = get_logger(__name__)
 
 
 # ============================================================
-# 演示话术定义
+# 演示话术定义（三栏布局：左-路由与记忆 / 中-RAG与兜底 / 右-边界防护）
+# 格式：每栏 list of rows，每行 list of (按钮文字, 完整话术)
+#       同行多按钮用 → 文字表示连续操作
 # ============================================================
-# 组A：共享 session（验证记忆 + route 切换）
-# 格式：(按钮短文字, 完整话术, tooltip全文)
-GROUP_A = [
-    ("1. 你好", "你好", "你好"),
-    ("2. 我叫张三...", "我叫张三，身份证 110101199001011234", "我叫张三，身份证 110101199001011234"),
-    ("2. 我叫什么名...", "我叫什么名字", "我叫什么名字"),
-    ("3. 帮我算一下...", "帮我算一下特斯拉的保费", "帮我算一下特斯拉的保费"),
-    ("3. 37岁特斯拉Y...", "37岁，特斯拉Y，驾龄5年", "37岁，特斯拉Y，驾龄5年"),
-    ("4. 我改变主意...", "我改变主意了，不计算保费了，帮我查一下保单，保单号 POL20260001", "我改变主意了，不计算保费了，帮我查一下保单，保单号 POL20260001"),
+ROUTE_MEMORY = [
+    [("你好", "你好")],
+    [("我叫张三", "我叫张三，身份证 110101199001011234"), ("→ 叫什么名", "我叫什么名字")],
+    [("帮我算保费", "帮我算一下特斯拉的保费"), ("→ 37岁特斯拉Y", "37岁，特斯拉Y，驾龄5年")],
+    [("我改变主意，查保单", "我改变主意了，不计算保费了，帮我查一下保单，保单号 POL20260001")],
 ]
 
-# 独立场景：每个按钮点击前建议重置 session
-INDEPENDENT_SCENARIOS = [
-    ("5. 车损险保障哪...", "车损险保障哪些情况？", "车损险保障哪些情况？"),
-    ("6. 太空飞船的保...", "太空飞船的保险赔不赔？", "太空飞船的保险赔不赔？"),
-    ("7. 我要投诉转...", "我要投诉，转人工", "我要投诉，转人工"),
-    ("8. 测×1001", "测" * 1001, "输入超长测试（1001个字符）"),
+RAG_FALLBACK = [
+    [("车损险保障哪些？", "车损险保障哪些情况？")],
+    [("太空飞船赔不赔？", "太空飞船的保险赔不赔？")],
+    [("我要投诉，转人工", "我要投诉，转人工")],
+]
+
+BOUNDARY = [
+    [("测×1001", "测" * 1001)],
 ]
 
 
@@ -65,28 +65,39 @@ def create_gradio_interface():
 
         gr.Markdown("---")
         gr.Markdown("### 📋 演示快捷面板")
-        
-        # 组A：记忆 + 路由切换
-        gr.Markdown("**组A：记忆 + 路由切换**（连续点击，共享同一 Session）")
+
+        all_demo_btns = []  # 收集所有按钮用于事件绑定
+
         with gr.Row():
-            group_a_btns = []
-            for i, (label, _, tooltip) in enumerate(GROUP_A):
-                btn = gr.Button(
-                    label, size="sm", variant="secondary",
-                    elem_id=f"demo_a_{i}"
-                )
-                group_a_btns.append((btn, tooltip))
-        
-        # 独立场景
-        gr.Markdown("**独立场景**（建议先点「重置会话」）")
-        with gr.Row():
-            indep_btns = []
-            for i, (label, _, tooltip) in enumerate(INDEPENDENT_SCENARIOS):
-                btn = gr.Button(
-                    label, size="sm", variant="secondary",
-                    elem_id=f"demo_i_{i}"
-                )
-                indep_btns.append((btn, tooltip))
+            # 左栏：路由与记忆
+            with gr.Column(scale=1):
+                gr.Markdown("**路由与记忆**")
+                for ri, row in enumerate(ROUTE_MEMORY):
+                    with gr.Row():
+                        for ci, (label, full_msg) in enumerate(row):
+                            btn = gr.Button(label, size="sm", variant="secondary",
+                                          elem_id=f"demo_rm_{ri}_{ci}")
+                            all_demo_btns.append((btn, full_msg))
+
+            # 中栏：RAG与兜底
+            with gr.Column(scale=1):
+                gr.Markdown("**RAG与兜底**")
+                for ri, row in enumerate(RAG_FALLBACK):
+                    with gr.Row():
+                        for ci, (label, full_msg) in enumerate(row):
+                            btn = gr.Button(label, size="sm", variant="secondary",
+                                          elem_id=f"demo_rf_{ri}_{ci}")
+                            all_demo_btns.append((btn, full_msg))
+
+            # 右栏：边界防护
+            with gr.Column(scale=1):
+                gr.Markdown("**边界防护**")
+                for ri, row in enumerate(BOUNDARY):
+                    with gr.Row():
+                        for ci, (label, full_msg) in enumerate(row):
+                            btn = gr.Button(label, size="sm", variant="secondary",
+                                          elem_id=f"demo_bd_{ri}_{ci}")
+                            all_demo_btns.append((btn, full_msg))
 
         # ============================================================
         # 核心响应函数
@@ -177,12 +188,11 @@ def create_gradio_interface():
             }
         })();
         """
-        for i, (_, _, tooltip) in enumerate(GROUP_A):
-            escaped = tooltip.replace('\\', '\\\\').replace('"', '\\"')
-            tooltip_js += f'var b=document.getElementById("demo_a_{i}");if(b)b.title="{escaped}";'
-        for i, (_, _, tooltip) in enumerate(INDEPENDENT_SCENARIOS):
-            escaped = tooltip.replace('\\', '\\\\').replace('"', '\\"')
-            tooltip_js += f'var b=document.getElementById("demo_i_{i}");if(b)b.title="{escaped}";'
+        for btn, full_msg in all_demo_btns:
+            elem_id = btn.elem_id
+            if elem_id:
+                escaped = full_msg.replace('\\', '\\\\').replace('"', '\\"')[:80]
+                tooltip_js += f'var b=document.getElementById("{elem_id}");if(b)b.title="{escaped}";'
         gr.HTML("<!-- tooltip -->", visible=True, js_on_load=tooltip_js)
 
         # 输入框提交
@@ -213,16 +223,8 @@ def create_gradio_interface():
             queue=False
         )
 
-        # 组A 演示按钮
-        for (btn, _), (_, full_msg, _) in zip(group_a_btns, GROUP_A):
-            btn.click(
-                make_demo_handler(full_msg),
-                [chatbot, session_state],
-                [msg, chatbot, session_state, msg, send_btn]
-            )
-
-        # 独立场景按钮
-        for (btn, _), (_, full_msg, _) in zip(indep_btns, INDEPENDENT_SCENARIOS):
+        # 演示快捷面板按钮
+        for btn, full_msg in all_demo_btns:
             btn.click(
                 make_demo_handler(full_msg),
                 [chatbot, session_state],

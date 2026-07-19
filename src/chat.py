@@ -7,6 +7,7 @@
 import time
 import json
 import uuid
+import asyncio
 import threading
 from src.route_types import Route
 from src.context import set_trace_id
@@ -311,10 +312,10 @@ async def _chat_api_stream_inner(session_id: str, message: str):
 
         full_text = ""
         current_text = ""
-        has_tool_calls = False
-        transfer_detected = False  # 检测转人工工具调用
+        transfer_detected = False
         route = Route.GENERAL
-        text_buffer = ""  # 缓冲 LLM 文本，防止工具调用时闪烁
+        round_buffer = ""             # 当前轮次文本缓冲
+        round_has_tool = False        # 当前轮次是否检测到工具调用
 
         try:
             async for event in state.graph.astream_events(
@@ -324,55 +325,48 @@ async def _chat_api_stream_inner(session_id: str, message: str):
             ):
                 kind = event.get("event", "")
 
-                # LLM 逐 token 流式输出
-                if kind == "on_chat_model_stream":
+                # 新 LLM 轮次开始：重置轮次状态
+                if kind == "on_chat_model_start":
+                    round_buffer = ""
+                    round_has_tool = False
+
+                # LLM 逐 token 流式输出 → 全部静默缓冲，不 yield
+                elif kind == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk:
-                        # 检查是否包含 tool_calls（LLM 决定调用工具）
                         tool_call_chunks = getattr(chunk, 'tool_call_chunks', None)
                         if tool_call_chunks:
-                            # 工具调用开始，丢弃缓冲文本
-                            has_tool_calls = True
-                            text_buffer = ""
-                            current_text = ""
+                            # 检测到工具调用：标记并清空缓冲
+                            round_has_tool = True
+                            round_buffer = ""
                         elif chunk.content and isinstance(chunk.content, str):
-                            if has_tool_calls:
-                                # 工具调用后的新 LLM 输出，直接流式显示
-                                current_text += chunk.content
-                                full_text = current_text
-                                yield current_text, None
-                            else:
-                                # 首次 LLM 输出，缓冲（可能后续会调工具）
-                                text_buffer += chunk.content
+                            round_buffer += chunk.content
 
-                # 工具调用执行中（丢弃缓冲）
+                # 工具调用执行中
                 elif kind == "on_tool_start":
                     tool_name = event.get("name", "")
                     if tool_name == TOOL_TRANSFER_NAME:
                         transfer_detected = True
-                    text_buffer = ""
-                    current_text = ""
-                    has_tool_calls = True
+                    round_buffer = ""
 
-                # LLM 单轮结束
+                # LLM 单轮结束：只有确认无工具调用的轮次才是最终答案
                 elif kind == "on_chat_model_end":
-                    # 检测文本中的转人工信号（流式 chunk 可能切断信号词，在累积文本中检查）
-                    if text_buffer and TRANSFER_SIGNAL in text_buffer:
+                    if round_buffer and TRANSFER_SIGNAL in round_buffer:
                         transfer_detected = True
-                        text_buffer = text_buffer.replace(TRANSFER_SIGNAL, "")
-                    if has_tool_calls and current_text and TRANSFER_SIGNAL in current_text:
-                        transfer_detected = True
-                        current_text = current_text.replace(TRANSFER_SIGNAL, "")
-
-                    if text_buffer and not has_tool_calls:
-                        # 没有工具调用，输出缓冲文本
-                        current_text = text_buffer
-                        full_text = text_buffer
-                        text_buffer = ""
-                        yield current_text, None
-                    elif has_tool_calls:
-                        # 工具调用后的 LLM 结束，重置缓冲
-                        text_buffer = ""
+                        round_buffer = round_buffer.replace(TRANSFER_SIGNAL, "")
+                    if round_has_tool:
+                        # 有工具调用：丢弃缓冲，继续等待下一轮
+                        round_buffer = ""
+                    elif round_buffer:
+                        # 无工具调用 = 最终答案 → 分块 yield 模拟流式体验
+                        text = round_buffer
+                        round_buffer = ""
+                        chunk_size = 50  # 每次输出 50 个字符（减少网络往返次数）
+                        for i in range(0, len(text), chunk_size):
+                            current_text = text[:i + chunk_size]
+                            full_text = current_text
+                            yield current_text, None
+                            await asyncio.sleep(0.005)  # 5ms 间隔
 
                 # 捕获路由结果
                 elif kind == "on_chain_end":

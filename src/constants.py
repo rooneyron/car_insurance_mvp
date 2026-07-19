@@ -27,14 +27,3 @@ JWT_ALGORITHM = "HS256"
 
 # ---------- API 路径白名单（无需 Token） ----------
 PUBLIC_PATHS = {"/health", "/", "/manifest.json", "/favicon.ico", "/queryToken", "/docs", "/openapi.json"}
-
-# RAG 空结果时的友好回复
-RAG_FALLBACK_MESSAGE = "暂未找到与您问题相匹配的保险条款，建议您转人工客服咨询。我们会为您安排专业人员解答。"
-
-# RAG 无结果时，工具返回的完整指令（含 XML 标签隔离）
-RAG_NO_RESULT_INSTRUCTION = (
-    "【系统指令】未检索到相关保险条款。"
-    "你必须将下方 <fallback> 标签内的文案原封不动地回复给用户，"
-    "禁止添加、修改、解释或总结任何内容。\n\n"
-    f"<fallback>\n{RAG_FALLBACK_MESSAGE}\n</fallback>"
-)

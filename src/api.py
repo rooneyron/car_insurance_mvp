@@ -23,14 +23,14 @@ def _verify_jwt_token(token: str, secret: str) -> tuple:
     返回 (is_valid: bool, error_response: JSONResponse | None)
     """
     if not token:
-        return False, JSONResponse(status_code=401, content={"detail": "Missing token"})
+        return False, JSONResponse(status_code=401, content={"detail": "访问令牌缺失，请输入有效 token 或联系管理员获取"})
     try:
         jwt.decode(token, secret, algorithms=[JWT_ALGORITHM])
         return True, None
     except jwt.ExpiredSignatureError:
-        return False, JSONResponse(status_code=401, content={"detail": "Token expired"})
+        return False, JSONResponse(status_code=401, content={"detail": "访问令牌已过期，请联系管理员获取新 token"})
     except jwt.InvalidTokenError:
-        return False, JSONResponse(status_code=401, content={"detail": "Invalid token"})
+        return False, JSONResponse(status_code=401, content={"detail": "访问令牌无效，请检查 token 是否正确或联系管理员"})
 
 
 def create_app() -> FastAPI:
@@ -51,8 +51,10 @@ def create_app() -> FastAPI:
         if path in PUBLIC_PATHS:
             return await call_next(request)
 
-        # 放行 /gradio/ 子资源（静态文件、API 等）
-        if path.startswith("/gradio/"):
+        # Gradio 初始页面访问需要 token，内部 API 调用放行
+        # /gradio 或 /gradio/ 是初始页面，需要校验 token
+        # /gradio/api/...、/gradio/queue/... 等子路径是内部调用，直接放行
+        if path.startswith("/gradio/") and path not in ("/gradio/", "/gradio"):
             return await call_next(request)
 
         # 其余路径需要 token

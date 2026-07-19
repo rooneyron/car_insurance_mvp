@@ -23,7 +23,7 @@ from src.rag import init_rag
 from src.chat import chat_api
 
 print("正在初始化...")
-graph = init_graph()
+graph, _ = init_graph()
 set_graph(graph)
 init_rag()
 print("初始化完成，开始并发测试。\n")

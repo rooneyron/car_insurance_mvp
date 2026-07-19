@@ -32,13 +32,20 @@ if __name__ == "__main__":
 
     try:
         # 初始化 StateGraph 编排图
-        graph = init_graph()
+        graph, llm = init_graph()
         set_graph(graph)
         # 初始化 RAG（加载 FAISS 索引和模型）
         init_rag()
         logger.info("预加载完成")
     except Exception as e:
         logger.warning("预加载失败: %s，服务仍会启动，但第一条消息可能较慢", e)
+
+    # ---------- 连接预热：提前建立到 LLM API 的 TCP/TLS 连接 ----------
+    try:
+        from src.chains.chains import warmup_llm
+        warmup_llm(llm)
+    except Exception as e:
+        logger.warning("LLM API 预热失败（不影响服务）: %s", e)
 
     # ---------- 组装应用 ----------
     app = create_app()

@@ -3,7 +3,6 @@ LangGraph StateGraph 多 Agent 编排
 路由作为图的一等公民节点，三个 Agent 作为执行节点
 """
 
-from math import log
 import os
 import json
 from langchain_openai import ChatOpenAI
@@ -102,11 +101,22 @@ def _get_rerank_llm() -> ChatOpenAI:
     """获取用于 RAG 重排的 LLM 单例"""
     global _rerank_llm
     if _rerank_llm is None:
+        import httpx
+        http_client = httpx.Client(
+            limits=httpx.Limits(
+                max_connections=10,
+                max_keepalive_connections=5,
+                keepalive_expiry=300,
+            ),
+            timeout=httpx.Timeout(10.0, connect=5.0),
+        )
         _rerank_llm = ChatOpenAI(
             model=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
             api_key=os.environ.get("DEEPSEEK_API_KEY"),
             base_url="https://api.deepseek.com/v1",
             temperature=0,
+            max_retries=1,
+            http_client=http_client,
         )
     return _rerank_llm
 
@@ -277,11 +287,24 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
     if model_name is None:
         model_name = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
+    # 配置 http 客户端，启用连接池 keep-alive，避免空闲后连接失效
+    import httpx
+    http_client = httpx.Client(
+        limits=httpx.Limits(
+            max_connections=10,
+            max_keepalive_connections=5,
+            keepalive_expiry=300,  # 5分钟 keep-alive
+        ),
+        timeout=httpx.Timeout(10.0, connect=5.0),  # 总超时10秒，连接超时5秒
+    )
+
     llm = ChatOpenAI(
         model=model_name,
         api_key=api_key,
         base_url="https://api.deepseek.com/v1",
         temperature=0.3,
+        max_retries=1,
+        http_client=http_client,
     )
 
     # ---------- 创建摘要节点 ----------
@@ -421,7 +444,20 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
     logger.info("✅ StateGraph 编排图构建完成")
     logger.info("📊 图结构: START -> route -> [general|sale|service] -> END")
 
-    return graph
+    return graph, llm
+
+
+def warmup_llm(llm: ChatOpenAI):
+    """
+    预热 LLM 连接：发送一个极轻量请求，提前建立 TCP/TLS 连接。
+    避免用户第一条消息因首请求延迟等待 20 秒。
+    """
+    try:
+        logger.info("正在预热 LLM 连接...")
+        llm.invoke("hi")
+        logger.info("LLM 连接预热完成")
+    except Exception as e:
+        logger.warning(f"LLM 预热失败（不影响服务）: {e}")
 
 
 # ============================================================
@@ -434,7 +470,7 @@ if __name__ == "__main__":
     logger.info(">>> 开始测试 StateGraph 初始化...")
 
     try:
-        graph = init_graph()
+        graph, _ = init_graph()
 
         logger.info("✅ StateGraph 初始化成功！")
         logger.info("  - Graph 类型: %s", type(graph).__name__)

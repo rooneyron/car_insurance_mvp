@@ -7,6 +7,6 @@ class Route(str, Enum):
 
 ROUTE_LABELS = {
     Route.GENERAL: "💬 闲聊",
-    Route.SALE: "💰 报价链",
-    Route.SERVICE: "🛠️ 理赔链",
+    Route.SALE: "💰 售前",
+    Route.SERVICE: "🛠️ 售后",
 }

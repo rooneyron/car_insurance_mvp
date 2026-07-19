@@ -31,7 +31,7 @@ from src.chat import chat_api
 # 初始化
 # ============================================================
 print("正在初始化（加载模型 + FAISS 索引）...")
-graph = init_graph()
+graph, _ = init_graph()
 set_graph(graph)
 init_rag()
 print("初始化完成，开始测试。\n")
