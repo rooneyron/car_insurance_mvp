@@ -55,6 +55,7 @@ def create_gradio_interface():
                 placeholder="请输入你的问题...",
                 scale=5,
                 interactive=True,
+                elem_id="msg-input",
             )
             send_btn = gr.Button("发送", variant="primary", scale=1)
         
@@ -195,17 +196,28 @@ def create_gradio_interface():
                 tooltip_js += f'var b=document.getElementById("{elem_id}");if(b)b.title="{escaped}";'
         gr.HTML("<!-- tooltip -->", visible=True, js_on_load=tooltip_js)
 
+        # 自动聚焦 JS：响应结束后自动聚焦输入框
+        _autofocus_js = """() => {
+            setTimeout(() => {
+                const el = document.getElementById('msg-input');
+                if (el) {
+                    const ta = el.querySelector('textarea');
+                    if (ta) ta.focus();
+                }
+            }, 100);
+        }"""
+
         # 输入框提交
         msg.submit(
             respond, 
             [msg, chatbot, session_state], 
             [msg, chatbot, session_state, msg, send_btn]
-        )
+        ).then(js=_autofocus_js)
         send_btn.click(
             respond,
             [msg, chatbot, session_state],
             [msg, chatbot, session_state, msg, send_btn]
-        )
+        ).then(js=_autofocus_js)
 
         # 清空对话（保留 session）
         clear_btn.click(
