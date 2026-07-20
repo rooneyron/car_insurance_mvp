@@ -320,7 +320,10 @@ def _make_router_node():
     """
     路由节点：纯关键词规则判断 + 构建纯净的 responder_input。
     - 根据用户输入关键词写入 agent_type
-    - 构建 responder_input：只包含当前用户消息 + 最近工具结果（含对应 AI tool_calls） + 摘要记忆
+    - 构建 responder_input：
+        - 如果有摘要：摘要 + 最近 3 轮对话（6 条消息），只取 Human 和 AIMessage
+        - 如果没有摘要：全部历史消息（过滤掉 Planner 空消息和工具调用）
+      + 最近一次工具调用对
     - 强制重置 direct_response = None，防止历史污染新请求
     """
     from src.core.routing import decide_route
@@ -329,7 +332,7 @@ def _make_router_node():
         start_time = time.time()
         session_id = config.get("configurable", {}).get("thread_id", "default")
         messages = state.get("messages", [])
-        summary = state.get("summary", None)  # 获取长期记忆摘要
+        summary = state.get("summary", None)
 
         if not messages:
             return {
@@ -343,37 +346,40 @@ def _make_router_node():
         last_msg = messages[-1]
         content = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
 
-        # 路由决策（复用现有 keyword_scan + llm_classify）
         route = decide_route(session_id, content)
         agent_type = route.value
 
-        # ---- 构建纯净的 responder_input ----
         responder_input = []
 
-        # 1. 加入摘要（如果有）
+        # ---- 构建核心上下文 ----
         if summary:
+            # 有摘要：用摘要代表旧历史，再补充最近 3 轮对话
             responder_input.append(SystemMessage(content=f"【用户长期记忆摘要】{summary}"))
+            recent_count = 6
+            recent_messages = messages[-recent_count:] if len(messages) > recent_count else messages
+            for msg in recent_messages:
+                # 只保留 Human 和 AIMessage（不含 tool_calls 且有内容），忽略 SystemMessage（避免重复）
+                if isinstance(msg, HumanMessage):
+                    responder_input.append(msg)
+                elif isinstance(msg, AIMessage) and not getattr(msg, 'tool_calls', None) and msg.content:
+                    responder_input.append(msg)
+                # SystemMessage 跳过（不加入）
+        else:
+            # 没有摘要：保留全部历史（过滤掉 Planner 空消息和工具调用）
+            for msg in messages:
+                if isinstance(msg, HumanMessage):
+                    responder_input.append(msg)
+                elif isinstance(msg, AIMessage) and not getattr(msg, 'tool_calls', None) and msg.content:
+                    responder_input.append(msg)
 
-        # 2. 加入当前用户消息（最后一条 HumanMessage）
-        current_human = None
-        for msg in reversed(messages):
-            if isinstance(msg, HumanMessage):
-                current_human = msg
-                break
-        if current_human:
-            responder_input.append(current_human)
-
-        # 3. 加入最近一次工具调用的完整对（AI(tool_calls) + ToolMessage）
-        # 必须成对出现，否则 DeepSeek API 报 400
+        # ---- 加入最近一次工具调用对（如有） ----
         last_tool_msg = None
         last_tool_call_ai = None
-        # 从后往前找第一条 ToolMessage
         for msg in reversed(messages):
             if isinstance(msg, ToolMessage):
                 last_tool_msg = msg
                 break
         if last_tool_msg:
-            # 根据 tool_call_id 查找对应的 AIMessage（带 tool_calls）
             tool_call_id = getattr(last_tool_msg, 'tool_call_id', None)
             if tool_call_id:
                 for msg in messages:
@@ -384,23 +390,19 @@ def _make_router_node():
                                 break
                         if last_tool_call_ai:
                             break
-            # 如果找到了对应的 AI，则一起加入；否则丢弃该 ToolMessage
             if last_tool_call_ai:
-                # 复制 AI 并清空其 content（避免多余文字污染）
                 ai_copy = AIMessage(content="", tool_calls=last_tool_call_ai.tool_calls)
                 responder_input.append(ai_copy)
                 responder_input.append(last_tool_msg)
             else:
-                # 没有对应 AI，丢弃该 ToolMessage（避免孤立）
                 logger.warning("丢弃孤立的 ToolMessage，缺少对应的 AIMessage(tool_calls)")
-                pass
 
         return {
             "agent_type": agent_type,
             "route": agent_type,
             "responder_input": responder_input,
-            "direct_response": None,  # 每次路由都重置短路信号
-            "summary": summary,       # 保留摘要供后续节点使用
+            "direct_response": None,
+            "summary": summary,
         }
 
     return router_node
