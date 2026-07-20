@@ -1,6 +1,6 @@
 MVP 核心工作（面试精简版）
 架构设计与工具解耦
-设计了三链路由（闲聊/报价/理赔），并将工具层与 Agent 解耦，为后续 MCP 迁移预留了扩展接口。
+设计手写 StateGraph 4 节点编排（router → planner ⇄ tools → responder），将工具层与 Agent 解耦，支持工具短路直返机制，为后续 MCP 迁移预留扩展接口。
 
 RAG 检索系统
 实现了基于 FAISS + FastEmbed 的本地向量检索，并通过 Rerank 策略（本地 Cross-Encoder / 线上 LLM 重排）提升了检索精度。

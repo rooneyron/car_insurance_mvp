@@ -1,18 +1,20 @@
 graph TB
+    END_NODE(("END"))
+
     subgraph 用户层
         A["Gradio 前端<br/>src/gradio_ui.py"]
         B["REST API<br/>POST /chat · src/api.py"]
     end
 
     subgraph 对话调度层
-        C["chat_api<br/>src/chat.py<br/>输入校验 · Token限额 · 转人工处理"]
+        C["chat_api_stream<br/>src/chat.py<br/>输入校验 · Token限额 · 流式终局确认"]
     end
 
     subgraph LangGraph StateGraph
-        D["route_node<br/>src/core/routing.py<br/>关键词匹配 → 意图继承 → 轻量级小模型意图识别"]
-        E["general_node<br/>闲聊/信息收集"]
-        F["sale_node<br/>售前 Agent"]
-        G["service_node<br/>售后 Agent"]
+        D["router 节点<br/>src/chains/chains.py<br/>关键词路由 + 构建纯净 responder_input<br/>摘要记忆 + 当前用户消息 + 最近工具结果对"]
+        E["planner 节点<br/>src/chains/chains.py<br/>非流式 LLM 决策 · bind_tools<br/>强制清空 content 防废话"]
+        F["tools 节点<br/>src/chains/chains.py<br/>ToolNode 执行 · 短路检测<br/>转人工/RAG无结果 → direct_response"]
+        G["responder 节点<br/>src/chains/chains.py<br/>流式 LLM 生成最终答案<br/>仅使用 responder_input"]
     end
 
     subgraph 工具层
@@ -29,25 +31,26 @@ graph TB
 
     subgraph 基础设施
         N["DeepSeek API<br/>LLM 推理"]
-        O["MemorySaver<br/>对话记忆 + SummarizationNode"]
+        O["MemorySaver<br/>对话记忆"]
+        P["SummarizationNode<br/>2000 token 摘要 → 500 token"]
     end
 
     A --> C
     B --> C
-    C -->|"state.graph.invoke"| D
-    D -->|general| E
-    D -->|sale| F
-    D -->|service| G
+    C -->|"state.graph.astream_events"| D
+    D -->|"router → planner"| E
+    E -->|"有 tool_calls"| F
+    E -->|"无 tool_calls"| G
+    F -->|"direct_response 非空 · 短路直返"| END_NODE
+    F -->|"回到 planner · ReAct 循环"| E
+    G --> END_NODE
     F --> H
+    F --> I
     F --> J
-    G --> I
-    G --> J
-    G --> K
+    F --> K
     J --> L
     L --> M
     E --> N
-    F --> N
     G --> N
-    E -.-> O
-    F -.-> O
-    G -.-> O
+    D -.-> O
+    D -.-> P

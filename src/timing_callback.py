@@ -33,13 +33,11 @@ class TimingCallbackHandler(BaseCallbackHandler):
         self._llm_counter += 1
         call_id = f"llm_{self._llm_counter}"
         self._llm_start_stack.append((call_id, time.time()))
-        logger.info("⏱️ [%s] LLM 调用开始", call_id)
 
     def _pop_llm_end(self):
         if self._llm_start_stack:
             call_id, start_time = self._llm_start_stack.pop()
             elapsed_ms = (time.time() - start_time) * 1000
-            logger.info("⏱️ [%s] LLM 调用结束: %.0fms", call_id, elapsed_ms)
             self._records.append({"label": f"{call_id} LLM", "ms": elapsed_ms})
 
     # --- on_chat_model_* (ChatOpenAI 主回调，最可靠) ---
@@ -56,9 +54,6 @@ class TimingCallbackHandler(BaseCallbackHandler):
             content = m.content if hasattr(m, 'content') else str(m)
             total_chars += len(content)
             prompt_data.append({"role": role, "content": content})
-        logger.info("📝 [%s] prompt: %d条消息, %d字符 | %s",
-                    call_id, len(prompt_data), total_chars,
-                    json.dumps(prompt_data, ensure_ascii=False))
 
     def on_chat_model_end(self, response, **kwargs):
         self._pop_llm_end()
@@ -93,7 +88,6 @@ class TimingCallbackHandler(BaseCallbackHandler):
         call_id = f"tool_{self._tool_counter}"
         tool_name = serialized.get("name", "unknown")
         self._tool_start_times[call_id] = {"start": time.time(), "name": tool_name}
-        logger.info("⏱️ [%s] 工具调用开始: %s", call_id, tool_name)
 
     def on_tool_end(self, output: str, **kwargs):
         call_id = None
@@ -104,7 +98,6 @@ class TimingCallbackHandler(BaseCallbackHandler):
         if call_id:
             info = self._tool_start_times.pop(call_id)
             elapsed_ms = (time.time() - info["start"]) * 1000
-            logger.info("⏱️ [%s] 工具调用结束: %s, %.0fms", call_id, info["name"], elapsed_ms)
             self._records.append({"label": f"{call_id} {info['name']}", "ms": elapsed_ms})
 
     def on_tool_error(self, error, **kwargs):

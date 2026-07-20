@@ -7,78 +7,90 @@
 2. 技术架构
 · FastAPI 接入口
 · Gradio 交互界面
-· LangGraph StateGraph 工作流编排
-· 3 个 Agent 节点（general/sale/service）
-· RAG 检索（FAISS + FastEmbed + LLM 重排）
-· 工具层解耦
+· LangGraph 手写 StateGraph 4 节点编排（router → planner ⇄ tools → responder → END）
+· 3 套 Agent 配置（general/sale/service），动态绑定 System Prompt + 工具集
+· RAG 检索（FAISS + FastEmbed + BGE-Reranker 本地重排）
+· 工具层解耦，每个 Agent 独立配置工具集
 
 3. 工作流与路由
-· StateGraph 条件边实现三级路由：关键词扫描 → 会话意图复用 → 轻量级小模型意图识别
-· 关键词配置化，业务方可热修改
+· 4 节点 StateGraph：router（关键词路由 + 构建纯净输入）→ planner（LLM 决策）→ tools（工具执行）→ responder（流式回答）
+· planner 通过条件边决定走 tools（有 tool_calls）或 responder（无 tool_calls）
+· tools 节点后有条件边：短路直返（direct_response 非空 → END）或回到 planner（ReAct 循环）
+· 三级路由：关键词扫描 → 会话意图复用 → 轻量级小模型意图识别
+· 关键词配置化（config.yaml），业务方可热修改
 
 4. 工具调用
 · 封装 4 个业务工具：算保费、查保单、RAG 条款检索、转人工
-· 工具与 Agent 解耦，每个 Agent 独立配置工具集，新增 Agent 时可灵活组合已有工具或扩展新工具
+· 工具与 Agent 解耦，general/sale/service 三个 Agent 各自配置工具集
 · 参数支持从对话历史复用，不重复索要用户已提供的信息
+· tools 节点短路机制：转人工（TRANSFER_SIGNAL）或 RAG 无结果时，直接返回前端，跳过 responder LLM 调用
 
 5. 部署与适配
 · 部署在 Render 免费实例（512MB）
 · FastEmbed 替换 sentence-transformers（800MB→300MB）
-· LLM 重排替代 1.1GB 本地 Rerank
+· BGE-Reranker 本地重排（生产环境可选 LLM 重排）
 · JWT + 日限额控制成本
 · Docker 容器化
 
 6. 上下文与记忆
 · MemorySaver 管理跨轮记忆
 · SummarizationNode 在 2000 token 时触发摘要压缩至 500 token
+· 摘要注入 responder_input：router 节点将长期记忆摘要作为 SystemMessage 加入纯净输入
+· responder_input 构建规则：摘要 + 当前用户消息 + 最近一次工具结果对（AI tool_calls + ToolMessage）
 · 空输入和超长输入（1000 字符）在入口处拦截，零 token 消耗
 
 7. 评估与优化
 · RAGAS 评估：Faithfulness 0.98 / Context Precision 0.97，Answer Relevancy 从 0.58 优化至 0.81
 · Rerank 阈值 0.8 通过 .env 配置
-· RAG 空结果时工具返回简单提示，LLM 自行判断并自然回答（如“太空飞船不在车险范围”），不再强制输出预设文案
+· RAG 空结果时工具返回简单提示，LLM 自行判断并自然回答
 
 8. 工程实践
 · Git 版本控制（功能分支工作流 feature/*，结构化提交信息）
 · 4 层 15 个错误码体系
-· 每次 LLM/Tool 调用独立计时日志
+· LLM 调用前打印完整 Prompt（格式化 JSON），便于调试
+· 请求结束后输出性能汇总（LLM/Tool 逐项耗时 + 总耗时）
 · Token 用量 JSON 日志
-· LLM 调用前打印完整消息链，便于调试 Prompt
 · 转人工信号增量检测（仅检查本轮新增消息，避免重复触发）
 · Session 级内存锁（threading.Lock + 非阻塞 acquire），覆盖 API 和 Gradio 双入口，防止 MemorySaver 写竞态
-· 流式输出文本缓冲机制，LLM 首次输出先缓冲，确认无工具调用后再显示，消除中间文本闪烁
+· 流式输出仅 responder 节点文本到达前端，planner 内部输出完全过滤
 
-prompt举例
+prompt 举例
 【角色定义】
 你是一个车险售后助手，帮助用户处理保单查询、保险条款查询和投诉转接。
-
 
 【职责边界】
 - 查询保单信息
 - 解释保险条款
 - 转接人工客服
 
-
 【行为规则】
 - 当用户询问保险条款相关问题时，必须调用 search_insurance_terms 工具检索，禁止凭自身知识直接回答。
 - 优先从对话历史中复用已提供的信息（身份证号、保单号）
 - 信息缺失时，向用户确认后再查询
 
-
 【输出风格】
 专业、简洁、直接。
-
 
 【拒绝边界】
 超出车险范围的咨询，引导用户转人工处理。
 
-
 日志举例
-2026-07-15 03:00:17 | INFO    | src.chat | 性能日志 - 总耗时: 7466ms
-  ├── SummarizationNode: 0ms
-  ├── llm_1 LLM: 1755ms
-  ├── tool_1 search_insurance_terms: 1355ms
-  ├── SummarizationNode: 0ms
-  ├── llm_2 LLM: 4343ms
-  ├── 总耗时: 7472ms
-  ├── 图执行: 7466ms
+2026-07-19 21:30:46 | INFO | 📝 [llm_1] 完整 prompt（2条消息, 288字符）:
+[
+  {"role": "system", "content": "【角色定义】..."},
+  {"role": "human", "content": "车损险保障哪些情况？"}
+]
+2026-07-19 21:30:54 | INFO | [stream] 性能日志 - 总耗时: 7757ms
+  ├── llm_1 LLM: 1243ms
+  ├── tool_1 search_insurance_terms: 666ms
+  ├── llm_2 LLM: 3033ms
+  ├── llm_3 LLM: 2799ms
+  ├── 总耗时: 7757ms
+
+
+
+* 全链路耗时优化：搭建 LLM / 工具分段计时日志，模型预加载 + 流式输出改造，单轮首字响应由 6.5s 优化至 1s 内。
+* RAG 检索质量优化：通过 RAGAS 评估定位检索相关性短板，调整 Agent 检索约束 Prompt，相关性得分 0.58→0.81。
+* 多层降级容错：设计 4 层异常错误码体系，覆盖 LLM、检索、入参、系统故障，配置自动降级逻辑，保障服务持续可用。
+* 线上部署降本适配：轻量化向量模型、移除本地重排依赖，搭配时效 Token + 每日调用限额，缩减内存占用并管控推理成本。
+* 流式体验架构重构：流式输出引入前端中间文本闪现问题，根因为 create_react_agent 黑箱无法隔离决策与输出。将编排层替换为手写 StateGraph 三节点工作流（planner 决策 → tools 执行 → responder 输出），实现决策与输出的完全解耦，彻底消除中间文本闪烁。
