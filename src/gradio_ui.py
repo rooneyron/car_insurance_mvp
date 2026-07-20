@@ -127,9 +127,11 @@ def create_gradio_interface():
                     return
                 if metadata:
                     last_metadata = metadata
-                if not partial_text:
-                    chat_history[assistant_idx]["content"] = "正在思考..."
-                else:
+                    tool_status = metadata.get("tool_status")
+                    if tool_status:
+                        # 显示工具调用状态（如"正在调用 保费计算器..."）
+                        chat_history[assistant_idx]["content"] = tool_status
+                if partial_text:
                     chat_history[assistant_idx]["content"] = partial_text
                 yield "", chat_history, session_id, gr.update(interactive=False), gr.update(interactive=False)
 
@@ -182,7 +184,8 @@ def create_gradio_interface():
                         var md = document.querySelector('#token-expiry');
                         if(md){
                             md.innerHTML = '🔑 Token 有效期至: ' + expStr;
-                            md.style.display = 'block';
+                            md.style.displa
+                            y = 'block';
                         }
                     }
                 }catch(e){console.error('Token parse error:', e);}

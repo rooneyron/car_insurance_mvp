@@ -43,10 +43,7 @@ _reranker = None
 # ---------- 工具函数 ----------
 def _log_missed_query(query: str, best_score: float = None, faiss_recall: int = None):
     """记录检索失败或低质量的查询"""
-    if faiss_recall == 0:
-        logger.warning("RAG未命中: query=%s, FAISS_recall=0", query)
-    else:
-        logger.warning("RAG低分: query=%s, best_score=%.3f", query, best_score)
+    pass
 
 
 # ---------- 1. 文本切割 ----------
@@ -196,20 +193,13 @@ def search_terms(query: str, top_k: int = 3) -> List[str]:
     2. Cross-Encoder 精排（输出 Top-K）
     如果精排最高分低于阈值，返回 ["未找到相关内容"]，并记录日志。
     """
-    # ====== 新增日志：打印查询词 ======
-    logger.info("RAG检索查询词: %s", query)
-    # ================================
-
     global _index, _chunks, _embedding_model, _reranker
 
     if _index is None or not _chunks:
         init_rag()
 
     # Step A: FAISS 粗排
-    start_faiss = time.time()
     candidates = _faiss_search(query)
-    elapsed_faiss = (time.time() - start_faiss) * 1000
-    logger.info("FAISS 检索: %.0fms, 召回 %d 个候选", elapsed_faiss, len(candidates))
 
     # 如果 FAISS 完全搜不到任何候选
     if not candidates:
@@ -217,14 +207,10 @@ def search_terms(query: str, top_k: int = 3) -> List[str]:
         return [RAG_EMPTY_RESULT]
 
     # Step B: Cross-Encoder 精排
-    start_rerank = time.time()
     pairs = [[query, cand] for cand in candidates]
     scores = _reranker.predict(pairs)
-    elapsed_rerank = (time.time() - start_rerank) * 1000
-    logger.info("Rerank 推理: %.0fms (对 %d 个候选)", elapsed_rerank, len(candidates))
 
     sorted_results = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
-    logger.info("Rerank 分数详情: %s", [(text[:50], score) for text, score in sorted_results[:5]])
 
     # 检查最高分是否低于阈值
     best_score = sorted_results[0][1]

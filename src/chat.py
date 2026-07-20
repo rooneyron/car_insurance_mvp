@@ -4,10 +4,10 @@
 路由决策已移入图内，由 route 节点负责。
 """
 
+import asyncio
 import time
 import json
 import uuid
-import asyncio
 import threading
 from src.route_types import Route
 from src.context import set_trace_id
@@ -128,6 +128,23 @@ def _error_response(error_code: ErrorCode):
     }
 
 
+def _invoke_graph(graph, input_data, config):
+    """同步包装异步图调用，兼容有无 event loop 的场景"""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # 已在异步上下文中（如 FastAPI），在新线程中运行协程
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, graph.ainvoke(input_data, config=config))
+            return future.result()
+    else:
+        return asyncio.run(graph.ainvoke(input_data, config=config))
+
+
 def chat_api(session_id: str, message: str) -> dict:
     """
     核心对话接口
@@ -149,22 +166,17 @@ def chat_api(session_id: str, message: str) -> dict:
 
 def _chat_api_inner(session_id: str, message: str) -> dict:
     """chat_api 内部实现（已持有 session 锁）"""
-    # ---------- 输入校验 ----------
     if not message or not message.strip():
         return _error_response(ErrorCode.INPUT_EMPTY)
     if len(message) > MAX_INPUT_LENGTH:
         return _error_response(ErrorCode.INPUT_TOO_LONG)
-
-    # ---------- 每日 Token 限额检查 ----------
     if is_budget_exceeded():
         return _error_response(ErrorCode.BUDGET_EXCEEDED)
 
     timer = Timer()
     timer.start("总耗时")
-
     logger.debug("收到消息: %s...", message[:30])
 
-    # 配置：thread_id 用于 Memory 持久化，callbacks 用于性能监控
     timing_handler = create_timing_handler()
     config = {
         "configurable": {"thread_id": session_id},
@@ -174,8 +186,6 @@ def _chat_api_inner(session_id: str, message: str) -> dict:
 
     try:
         timer.start("图执行")
-
-        # ---------- 入口摘要：在进入图之前压缩历史消息 ----------
         history_count = 0
         try:
             prev_state = state.graph.get_state(config).values
@@ -189,36 +199,41 @@ def _chat_api_inner(session_id: str, message: str) -> dict:
         except Exception:
             pass
 
-        # 调用编排图（路由 + Agent 调度都在图内完成）
-        result = state.graph.invoke(
+        result = _invoke_graph(
+            state.graph,
             {"messages": [{"role": "user", "content": message}]},
             config=config
         )
-
         timer.stop("图执行")
 
-        # ---------- 从图状态提取结果 ----------
         route_str = result.get("route", Route.GENERAL.value)
         try:
             route = Route(route_str)
         except ValueError:
             route = Route.GENERAL
 
-        # 回复文本
+        # ---- 回复文本：优先从 direct_response 取 ----
         reply = result.get("reply", "")
-        if not reply and result.get("messages"):
+        direct_response = result.get("direct_response")
+        if direct_response and isinstance(direct_response, str):
+            if direct_response.startswith("{"):
+                try:
+                    dr = json.loads(direct_response)
+                    reply = dr.get("message", direct_response)
+                except json.JSONDecodeError:
+                    reply = direct_response
+            else:
+                reply = direct_response
+        elif not reply and result.get("messages"):
             last_msg = result["messages"][-1]
             reply = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
+        # ------------------------------------------------
 
-        # 转人工检查（只检查本轮新增消息）
         transfer_flag = _check_transfer_flag(result, history_count)
-
-        # ---------- 提取 Token 使用量（统一处理） ----------
         input_tokens, output_tokens, cached_tokens = _process_usage(result)
         timer.stop("总耗时")
         _log_token_and_perf(session_id, route, input_tokens, output_tokens, cached_tokens, timer, timing_handler)
 
-        # ---------- 处理转人工 ----------
         if transfer_flag:
             ticket_id = f"TK{int(time.time())}{session_id[-4:]}"
             clean_reply = reply.replace(TRANSFER_SIGNAL, "").strip()
@@ -233,7 +248,6 @@ def _chat_api_inner(session_id: str, message: str) -> dict:
                 "elapsed_ms": timer.get_total_ms()
             }
 
-        # ---------- 正常返回 ----------
         return {
             "success": 0,
             "content": {
@@ -247,7 +261,6 @@ def _chat_api_inner(session_id: str, message: str) -> dict:
     except GraphRecursionError as e:
         logger.error("GraphRecursionError: %s", e, exc_info=True)
         return _error_response(ErrorCode.GRAPH_RECURSION_LIMIT)
-
     except Exception as e:
         logger.error("chat_api 异常: %s", e, exc_info=True)
         return _error_response(ErrorCode.UNKNOWN)
@@ -314,8 +327,10 @@ async def _chat_api_stream_inner(session_id: str, message: str):
         current_text = ""
         transfer_detected = False
         route = Route.GENERAL
-        round_buffer = ""             # 当前轮次文本缓冲
-        round_has_tool = False        # 当前轮次是否检测到工具调用
+        tool_status_cleared = False  # 是否已在 responder 首次出字时清除 tool_status
+
+        # 导入工具标签映射
+        from src.chains.chains import TOOL_LABELS
 
         try:
             async for event in state.graph.astream_events(
@@ -324,51 +339,37 @@ async def _chat_api_stream_inner(session_id: str, message: str):
                 version="v2",
             ):
                 kind = event.get("event", "")
+                node_name = event.get("metadata", {}).get("langgraph_node", "")
 
-                # 新 LLM 轮次开始：重置轮次状态
-                if kind == "on_chat_model_start":
-                    round_buffer = ""
-                    round_has_tool = False
-
-                # LLM 逐 token 流式输出 → 全部静默缓冲，不 yield
-                elif kind == "on_chat_model_stream":
-                    chunk = event.get("data", {}).get("chunk")
-                    if chunk:
-                        tool_call_chunks = getattr(chunk, 'tool_call_chunks', None)
-                        if tool_call_chunks:
-                            # 检测到工具调用：标记并清空缓冲
-                            round_has_tool = True
-                            round_buffer = ""
-                        elif chunk.content and isinstance(chunk.content, str):
-                            round_buffer += chunk.content
-
-                # 工具调用执行中
-                elif kind == "on_tool_start":
+                # ---- 工具开始 → 推送"正在调用..."状态 ----
+                if kind == "on_tool_start":
                     tool_name = event.get("name", "")
+                    label = TOOL_LABELS.get(tool_name, tool_name)
+                    yield "", {"tool_status": f"正在调用 {label}..."}
                     if tool_name == TOOL_TRANSFER_NAME:
                         transfer_detected = True
-                    round_buffer = ""
 
-                # LLM 单轮结束：只有确认无工具调用的轮次才是最终答案
-                elif kind == "on_chat_model_end":
-                    if round_buffer and TRANSFER_SIGNAL in round_buffer:
-                        transfer_detected = True
-                        round_buffer = round_buffer.replace(TRANSFER_SIGNAL, "")
-                    if round_has_tool:
-                        # 有工具调用：丢弃缓冲，继续等待下一轮
-                        round_buffer = ""
-                    elif round_buffer:
-                        # 无工具调用 = 最终答案 → 分块 yield 模拟流式体验
-                        text = round_buffer
-                        round_buffer = ""
-                        chunk_size = 50  # 每次输出 50 个字符（减少网络往返次数）
-                        for i in range(0, len(text), chunk_size):
-                            current_text = text[:i + chunk_size]
-                            full_text = current_text
-                            yield current_text, None
-                            await asyncio.sleep(0.005)  # 5ms 间隔
+                # ---- 工具结束 → 推送"调用完成"状态 ----
+                elif kind == "on_tool_end":
+                    tool_name = event.get("name", "")
+                    label = TOOL_LABELS.get(tool_name, tool_name)
+                    yield "", {"tool_status": f"{label} 调用完成"}
 
-                # 捕获路由结果
+                # ---- LLM 流式输出（仅 responder 节点）----
+                elif kind == "on_chat_model_stream":
+                    if node_name != "responder":
+                        continue  # 忽略 planner 的内部输出，绝不传给前端
+                    chunk = event.get("data", {}).get("chunk")
+                    if chunk and chunk.content and isinstance(chunk.content, str):
+                        current_text += chunk.content
+                        full_text = current_text
+                        # 首次出字时清除 tool_status，前端切换到打字机模式
+                        if not tool_status_cleared:
+                            yield "", {"tool_status": None}
+                            tool_status_cleared = True
+                        yield current_text, None
+
+                # ---- 捕获路由结果 ----
                 elif kind == "on_chain_end":
                     data = event.get("data", {})
                     output = data.get("output", {})
@@ -391,9 +392,28 @@ async def _chat_api_stream_inner(session_id: str, message: str):
         elapsed_ms = timer.get_total_ms()
 
         # ---------- 后处理 ----------
-        # 转人工信号（基于工具调用检测）
         transfer = False
-        if transfer_detected:
+
+        # 检查是否有短路直返（direct_response 非空 = 特定工具结果直接返回，跳过 planner → responder）
+        try:
+            final_state = state.graph.get_state(config).values
+            direct_response = final_state.get("direct_response")
+        except Exception:
+            direct_response = None
+
+        if direct_response:
+            if direct_response.startswith("{"):
+                try:
+                    dr = json.loads(direct_response)
+                    transfer = dr.get("transfer", False)
+                    current_text = dr.get("message", direct_response)
+                except json.JSONDecodeError:
+                    current_text = direct_response
+            else:
+                current_text = direct_response
+            full_text = current_text
+        elif transfer_detected:
+            # 正常路径下的转人工信号（非短路）
             transfer = True
             ticket_id = f"TK{int(time.time())}{session_id[-4:]}"
             # 追加转人工提示和工单号

@@ -25,3 +25,6 @@ data/usage_cache.json
 # 操作系统
 .DS_Store
 Thumbs.db
+
+# 测试产物
+tests/test_result.txt
