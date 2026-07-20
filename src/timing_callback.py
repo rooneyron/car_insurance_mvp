@@ -51,7 +51,12 @@ class TimingCallbackHandler(BaseCallbackHandler):
         total_chars = 0
         for m in msg_list:
             role = m.type if hasattr(m, 'type') else 'unknown'
-            content = m.content if hasattr(m, 'content') else str(m)
+            # 如果是带 tool_calls 的 AIMessage，显示工具调用信息而非空 content
+            if role == 'ai' and getattr(m, 'tool_calls', None):
+                tool_names = [tc.get('name', 'unknown') for tc in m.tool_calls]
+                content = f"[调用工具: {', '.join(tool_names)}]"
+            else:
+                content = m.content if hasattr(m, 'content') else str(m)
             total_chars += len(content)
             prompt_data.append({"role": role, "content": content})
         logger.info("📝 [%s] 完整 prompt（%d条消息, %d字符）:\n%s",

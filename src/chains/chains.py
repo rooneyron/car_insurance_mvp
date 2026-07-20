@@ -383,6 +383,8 @@ def _make_planner_node(llm):
         system_prompt = SYSTEM_PROMPTS.get(agent_type, SYSTEM_PROMPTS[Route.GENERAL.value])
         tools = AGENT_TOOLS.get(agent_type, [])
         messages = list(state.get("messages", []))
+        # 过滤掉空的 AIMessage（planner 历史遗留），避免浪费 token
+        messages = [m for m in messages if not (isinstance(m, AIMessage) and not m.content and not getattr(m, 'tool_calls', None))]
 
         full_messages = [SystemMessage(content=system_prompt)] + messages
 
@@ -391,7 +393,8 @@ def _make_planner_node(llm):
         else:
             result = llm.invoke(full_messages)
 
-        result.content = ""
+        result.content = ""  # 强制清空 content，防止废话污染历史
+
         return {"messages": [result]}
 
     return planner_node
