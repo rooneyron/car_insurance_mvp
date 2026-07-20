@@ -94,32 +94,15 @@ def query_policy_logic(policy_id: str, id_card: str) -> str:
     return f"❌ 未找到保单（保单号：{policy_id}，身份证号：{id_card}），请核对信息后重新查询。"
 
 
-# ---------- 模块级 LLM 实例（供生产模式 RAG 重排复用）----------
-_rerank_llm: Optional[ChatOpenAI] = None
+# ---------- 存储 LLM 实例供工具使用 ----------
+_rag_llm: Optional[ChatOpenAI] = None
 
 
-def _get_rerank_llm() -> ChatOpenAI:
+def _get_rag_llm() -> ChatOpenAI:
     """获取用于 RAG 重排的 LLM 单例"""
-    global _rerank_llm
-    if _rerank_llm is None:
-        import httpx
-        http_client = httpx.Client(
-            limits=httpx.Limits(
-                max_connections=10,
-                max_keepalive_connections=5,
-                keepalive_expiry=300,
-            ),
-            timeout=httpx.Timeout(10.0, connect=5.0),
-        )
-        _rerank_llm = ChatOpenAI(
-            model=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
-            api_key=os.environ.get("DEEPSEEK_API_KEY"),
-            base_url="https://api.deepseek.com/v1",
-            temperature=0,
-            max_retries=1,
-            http_client=http_client,
-        )
-    return _rerank_llm
+    if _rag_llm is None:
+        raise RuntimeError("RAG LLM 未初始化，请先调用 init_graph")
+    return _rag_llm
 
 
 def search_insurance_terms_logic(query: str) -> str:
@@ -128,44 +111,39 @@ def search_insurance_terms_logic(query: str) -> str:
     根据环境变量 USE_LOCAL_RERANK 决定使用本地 Rerank 还是 LLM 重排。
     """
     use_local_rerank = os.environ.get("USE_LOCAL_RERANK", "true").lower() == "true"
+    logger.info("🔍 [RAG工具] query='%s' | mode=%s", query, "本地Rerank" if use_local_rerank else "LLM重排")
 
     try:
         if use_local_rerank:
             # ====== 本地模式：FAISS + Rerank ======
             results = search_terms(query, top_k=2)
             if not results or results == [RAG_EMPTY_RESULT]:
+                logger.info("🔍 [RAG工具] 返回: 未检索到相关保险条款")
                 return "未检索到相关保险条款。"
 
             output = f"📄 关于「{query}」的相关条款（已智能排序）：\n\n"
             for i, result in enumerate(results, 1):
                 output += f"--- 结果 {i} ---\n{result}\n\n"
+            logger.info("🔍 [RAG工具] 返回 %d 条结果:\n%s", len(results), output[:500])
             return output
 
         else:
-            # ====== 生产模式：FAISS 召回 + LLM 重排 ======
-            candidates = retrieve_candidates(query, top_k=10)
-            if not candidates:
+            # ====== 生产模式：FAISS 召回 + LLM 相关性分类（由 rag.py 内部处理） ======
+            # 注意：这里传入 llm 实例给 search_terms
+            llm = _get_rag_llm()
+            results = search_terms(query, top_k=2, llm=llm)
+            if not results or results == [RAG_EMPTY_RESULT]:
+                logger.info("🔍 [RAG工具] 生产模式返回: 未检索到相关保险条款")
                 return "未检索到相关保险条款。"
 
-            prompt = f"""你是一个保险条款检索助手。用户的问题是："{query}"
-
-请从以下候选条款中，选出最相关的 2 条，并按相关性从高到低排序。
-只返回选中的条款原文，用 --- 分隔。
-
-候选条款：
-{chr(10).join([f'[{i+1}] {c}' for i, c in enumerate(candidates)])}
-"""
-            response = _get_rerank_llm().invoke(prompt)
-            selected = [r.strip() for r in response.content.split('---') if r.strip()]
-            if not selected:
-                selected = candidates[:2]
-
             output = f"📄 关于「{query}」的相关条款（已智能排序）：\n\n"
-            for i, result in enumerate(selected, 1):
+            for i, result in enumerate(results, 1):
                 output += f"--- 结果 {i} ---\n{result}\n\n"
+            logger.info("🔍 [RAG工具] 生产模式 LLM重排返回 %d 条:\n%s", len(results), output[:500])
             return output
 
     except Exception as e:
+        logger.error("🔍 [RAG工具] 异常: %s", e)
         return "未检索到相关保险条款。"
 
 
@@ -319,12 +297,6 @@ def _create_summarization_node(llm):
 def _make_router_node():
     """
     路由节点：纯关键词规则判断 + 构建纯净的 responder_input。
-    - 根据用户输入关键词写入 agent_type
-    - 构建 responder_input：
-        - 如果有摘要：摘要 + 最近 3 轮对话（6 条消息），只取 Human 和 AIMessage
-        - 如果没有摘要：全部历史消息（过滤掉 Planner 空消息和工具调用）
-      + 最近一次工具调用对
-    - 强制重置 direct_response = None，防止历史污染新请求
     """
     from src.core.routing import decide_route
 
@@ -353,19 +325,15 @@ def _make_router_node():
 
         # ---- 构建核心上下文 ----
         if summary:
-            # 有摘要：用摘要代表旧历史，再补充最近 3 轮对话
             responder_input.append(SystemMessage(content=f"【用户长期记忆摘要】{summary}"))
             recent_count = 6
             recent_messages = messages[-recent_count:] if len(messages) > recent_count else messages
             for msg in recent_messages:
-                # 只保留 Human 和 AIMessage（不含 tool_calls 且有内容），忽略 SystemMessage（避免重复）
                 if isinstance(msg, HumanMessage):
                     responder_input.append(msg)
                 elif isinstance(msg, AIMessage) and not getattr(msg, 'tool_calls', None) and msg.content:
                     responder_input.append(msg)
-                # SystemMessage 跳过（不加入）
         else:
-            # 没有摘要：保留全部历史（过滤掉 Planner 空消息和工具调用）
             for msg in messages:
                 if isinstance(msg, HumanMessage):
                     responder_input.append(msg)
@@ -409,13 +377,7 @@ def _make_router_node():
 
 
 def _make_planner_node(llm):
-    """
-    决策节点：非流式调用 LLM，决定是否调用工具。
-    - 根据 agent_type 选择 System Prompt 和 Tools
-    - 调用 model.bind_tools(tools).invoke()（非流式）
-    - 强制清空 content，防止任何废话污染历史
-    """
-
+    """决策节点：非流式调用 LLM，决定是否调用工具。"""
     def planner_node(state: GraphState, config: RunnableConfig) -> dict:
         agent_type = state.get("agent_type", Route.GENERAL.value)
         system_prompt = SYSTEM_PROMPTS.get(agent_type, SYSTEM_PROMPTS[Route.GENERAL.value])
@@ -429,21 +391,14 @@ def _make_planner_node(llm):
         else:
             result = llm.invoke(full_messages)
 
-        # 强制清空 content，防止废话污染历史
         result.content = ""
-
         return {"messages": [result]}
 
     return planner_node
 
 
 def _make_tools_node():
-    """
-    工具执行节点：执行工具 + 更新 responder_input。
-    - 使用 ToolNode(ALL_TOOLS) 执行工具
-    - 将工具结果同步追加到 responder_input
-    - TRANSFER_SIGNAL 替换为纯文本占位
-    """
+    """工具执行节点：执行工具 + 更新 responder_input + 短路直返。"""
     tool_node = ToolNode(ALL_TOOLS)
 
     def _tools_node(state: GraphState, config: RunnableConfig) -> dict:
@@ -451,9 +406,6 @@ def _make_tools_node():
 
         new_responder = list(state.get("responder_input", []))
 
-        # 获取触发本次工具调用的 AIMessage（带 tool_calls，content 置空）
-        # 必须插入到 ToolMessage 之前，否则 DeepSeek API 报错：
-        # "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"
         messages = state.get("messages", [])
         last_ai = None
         for msg in reversed(messages):
@@ -482,7 +434,6 @@ def _make_tools_node():
         for msg in result.get("messages", []):
             if isinstance(msg, ToolMessage):
                 content = str(msg.content)
-                # 场景 1：转人工工具返回 TRANSFER_SIGNAL
                 if TRANSFER_SIGNAL in content:
                     session_id = config.get("configurable", {}).get("thread_id", "default")
                     ticket_id = f"TK{int(time.time())}{session_id[-4:]}"
@@ -492,7 +443,6 @@ def _make_tools_node():
                         "message": "正在为您转接人工客服，工单号：" + ticket_id,
                     }, ensure_ascii=False)
                     break
-                # 场景 2：条款搜索工具返回 "未检索到相关保险条款"
                 if "未检索到相关保险条款" in content:
                     direct_response = "很抱歉，我在知识库中没有找到与您问题相关的条款信息，建议您转人工咨询。"
                     break
@@ -553,6 +503,8 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
     初始化手写 StateGraph 编排图，返回编译后的图。
     图结构: START → router → planner ⇄ tools → responder → END
     """
+    global _rag_llm
+
     if api_key is None:
         api_key = os.environ.get("DEEPSEEK_API_KEY")
         if not api_key:
@@ -579,16 +531,16 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         http_client=http_client,
     )
 
+    # 保存 LLM 实例供 RAG 工具使用
+    _rag_llm = llm
+
     # ---------- 创建摘要节点 ----------
     summarization_node = _create_summarization_node(llm)
 
     # ---------- 自定义摘要注入函数：将摘要存入 state.summary ----------
     def summarize_and_store(state: dict) -> dict:
-        """在每次图执行前压缩历史，并将摘要存入 state"""
         result = summarization_node.invoke({"messages": state.get("messages", [])})
-        # result 应包含 "messages" 字段，其中可能追加了摘要消息
         new_messages = result.get("messages", [])
-        # 提取摘要内容：最后一条 SystemMessage 通常为摘要
         summary = None
         if new_messages and isinstance(new_messages[-1], SystemMessage):
             summary = new_messages[-1].content
@@ -615,11 +567,9 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
     builder.add_node("tools", tools_node)
     builder.add_node("responder", responder_node)
 
-    # 边
     builder.add_edge(START, "router")
     builder.add_edge("router", "planner")
 
-    # planner 条件分支：有 tool_calls → tools，无 → responder
     builder.add_conditional_edges(
         "planner",
         _planner_condition,
@@ -629,7 +579,6 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         }
     )
 
-    # tools 条件分支：有 direct_response → END（短路），否则 → planner（ReAct 循环）
     builder.add_conditional_edges(
         "tools",
         _after_tools_condition,
@@ -639,7 +588,6 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         }
     )
 
-    # responder → END
     builder.add_edge("responder", END)
 
     graph = builder.compile(checkpointer=memory)
@@ -653,7 +601,6 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
 def warmup_llm(llm: ChatOpenAI):
     """
     预热 LLM 连接：发送一个极轻量请求，提前建立 TCP/TLS 连接。
-    避免用户第一条消息因首请求延迟等待 20 秒。
     """
     try:
         logger.info("正在预热 LLM 连接...")
@@ -664,7 +611,7 @@ def warmup_llm(llm: ChatOpenAI):
 
 
 # ============================================================
-# 4. 测试代码
+# 7. 测试代码
 # ============================================================
 
 if __name__ == "__main__":
@@ -678,7 +625,6 @@ if __name__ == "__main__":
         logger.info("✅ StateGraph 初始化成功！")
         logger.info("  - Graph 类型: %s", type(graph).__name__)
 
-        # 尝试生成 Mermaid 图
         try:
             mermaid = graph.get_graph().draw_mermaid()
             logger.info("📊 Mermaid 图生成成功:\n%s", mermaid)

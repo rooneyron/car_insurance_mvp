@@ -44,7 +44,7 @@ class TimingCallbackHandler(BaseCallbackHandler):
 
     def on_chat_model_start(self, serialized: Dict[str, Any], messages: List[List[BaseMessage]], **kwargs):
         self._push_llm_start()
-        # 打印完整 prompt（供 curl 对比测试）
+        # 打印完整 prompt（供调试对比）
         call_id = f"llm_{self._llm_counter}"
         msg_list = messages[0] if messages else []
         prompt_data = []
@@ -54,6 +54,9 @@ class TimingCallbackHandler(BaseCallbackHandler):
             content = m.content if hasattr(m, 'content') else str(m)
             total_chars += len(content)
             prompt_data.append({"role": role, "content": content})
+        logger.info("📝 [%s] 完整 prompt（%d条消息, %d字符）:\n%s",
+                    call_id, len(prompt_data), total_chars,
+                    json.dumps(prompt_data, ensure_ascii=False, indent=2))
 
     def on_chat_model_end(self, response, **kwargs):
         self._pop_llm_end()
