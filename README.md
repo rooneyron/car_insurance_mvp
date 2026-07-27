@@ -74,7 +74,7 @@ ACCESS_TOKEN_SECRET=your-secret   # JWT 签名密钥（用于 Token 生成与校
 # ===== 选填 =====
 DEEPSEEK_MODEL=deepseek-v4-flash  # 模型名称，默认 deepseek-v4-flash
 USE_LOCAL_RERANK=true             # 是否使用本地 BGE-Reranker，默认 true
-RAG_SCORE_THRESHOLD=0.6           # RAG 重排序阈值，默认 0.6（越高越严格）
+RAG_SCORE_THRESHOLD=0.8           # RAG 重排序阈值，默认 0.8（越高越严格）
 DAILY_TOKEN_LIMIT=1000000         # 每日 Token 限额，默认 1000000
 ```
 
@@ -152,10 +152,7 @@ car_insurance_mvp/
 │
 ├── doc/                        # 文档
 │   ├── EXPERIENCE_LOG.md       #   开发决策日志
-│   ├── TEST_LOG.md             #   测试报告
 │   ├── project_introduction.txt#   项目介绍文档
-│   ├── detail.txt              #   详细设计说明
-│   ├── todo.txt                #   待办事项
 │   ├── architecture.mmd        #   系统架构图（Mermaid 源文件）
 │   └── architecture.png        #   系统架构图（PNG）
 │
