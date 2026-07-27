@@ -184,8 +184,7 @@ def create_gradio_interface():
                         var md = document.querySelector('#token-expiry');
                         if(md){
                             md.innerHTML = '🔑 Token 有效期至: ' + expStr;
-                            md.style.displa
-                            y = 'block';
+                            md.style.display = 'block';
                         }
                     }
                 }catch(e){console.error('Token parse error:', e);}
