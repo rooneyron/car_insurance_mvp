@@ -1,3 +1,9 @@
+"""
+[DEPRECATED] 旧版路由逻辑，已被 src/router/ 四层漏斗路由器替代。
+保留此文件仅供历史参考，不应在新代码中导入。
+新路由请使用: from src.router import route_message
+"""
+
 import re
 import os
 import yaml

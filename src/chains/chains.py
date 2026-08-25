@@ -16,6 +16,13 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, Tool
 from typing import Optional, TypedDict, Annotated
 from langgraph.graph.message import add_messages
 from src.constants import RAG_EMPTY_RESULT, TRANSFER_SIGNAL
+from src.constants import (
+    INTENT_GENERAL, INTENT_SALE, INTENT_SERVICE, INTENT_VALUES,
+    ACTION_ROUTE, ACTION_CLARIFY, ACTION_HANDOFF,
+    SOURCE_L0_SAFETY, SOURCE_DST, SOURCE_L1_KEYWORD, SOURCE_L2, SOURCE_L3,
+    SOURCE_L4_CLARIFY, SOURCE_L4_HANDOFF,
+)
+from src.router.prompts import AGENT_SYSTEM_PROMPTS
 from src.logger import get_logger
 from src.route_types import Route
 import time
@@ -69,29 +76,41 @@ def calculate_premium_logic(car_model: str, driver_age: int, years_driving: int)
     )
 
 
-def query_policy_logic(policy_id: str, id_card: str) -> str:
+def query_policy_logic(policy_id: Optional[str] = None, id_card: Optional[str] = None) -> dict:
     """
-    保单查询核心逻辑
+    保单查询核心逻辑。
+    返回结构化结果：success / missing_params / error
     """
+    # 参数验证
+    missing = []
+    if not policy_id:
+        missing.append("policy_id")
+    if not id_card:
+        missing.append("id_card")
+    if missing:
+        return {"status": "missing_params", "missing": missing}
+
     data_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "policies.json")
     with open(data_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     for policy in data["保单列表"]:
         if policy["保单号"] == policy_id and policy["身份证号"] == id_card:
-            return (
-                f"✅ 保单查询成功\n"
-                f"保单号：{policy['保单号']}\n"
-                f"车主：{policy['车主姓名']}\n"
-                f"车型：{policy['车型']}\n"
-                f"险种：{', '.join(policy['险种'])}\n"
-                f"保额：{policy['保额']:,} 元\n"
-                f"年保费：{policy['年保费']:,} 元\n"
-                f"到期日：{policy['到期日']}\n"
-                f"状态：{policy['状态']}"
-            )
+            return {
+                "status": "success",
+                "data": {
+                    "保单号": policy["保单号"],
+                    "车主": policy["车主姓名"],
+                    "车型": policy["车型"],
+                    "险种": ", ".join(policy["险种"]),
+                    "保额": f"{policy['保额']:,} 元",
+                    "年保费": f"{policy['年保费']:,} 元",
+                    "到期日": policy["到期日"],
+                    "状态": policy["状态"],
+                }
+            }
 
-    return f"❌ 未找到保单（保单号：{policy_id}，身份证号：{id_card}），请核对信息后重新查询。"
+    return {"status": "error", "message": f"未找到保单（保单号：{policy_id}，身份证号：{id_card}），请核对信息后重新查询。"}
 
 
 # ---------- 存储 LLM 实例供工具使用 ----------
@@ -165,9 +184,11 @@ def calculate_premium(car_model: str, driver_age: int, years_driving: int) -> st
 
 
 @tool
-def query_policy(policy_id: str, id_card: str) -> str:
-    """查询保单详情。当用户询问保单信息、保单状态时调用。参数：policy_id（保单号）、id_card（身份证号）"""
-    return query_policy_logic(policy_id, id_card)
+def query_policy(policy_id: Optional[str] = None, id_card: Optional[str] = None) -> str:
+    """查询保单详情。当用户询问保单信息、保单状态时调用。参数：policy_id（保单号）、id_card（身份证号）。即使参数不全也请调用，工具会返回缺少哪些参数。"""
+    result = query_policy_logic(policy_id, id_card)
+    # 工具返回结构化 dict，由 tools_node 解析处理
+    return json.dumps(result, ensure_ascii=False)
 
 
 @tool
@@ -183,73 +204,14 @@ def transfer_to_human(reason: str) -> str:
 
 
 # ============================================================
-# 3. Agent 配置
+# 3. Agent 配置（Prompt 来自 src/router/prompts.py）
 # ============================================================
-
-SYSTEM_PROMPTS = {
-    "general": """【角色定义】
-你是一个友好的车险客服助手，负责承接用户的初始咨询。
-
-【职责边界】
-- 承接用户的第一轮咨询
-- 引导用户表达具体需求（报价、理赔、保单查询、投诉等）
-- 记录用户提供的个人信息（身份证号、姓名、车牌号等），传递给后续助手
-
-【行为规则】
-- 如果用户提供了个人信息，简单回应"已记录"并引导到具体业务
-- 如果用户没有说明具体需求，主动询问："您是需要报价、理赔咨询还是保单查询？"
-
-【输出风格】
-友好、自然、引导性强。
-
-【拒绝边界】
-超出车险范围的咨询，直接引导转人工。""",
-
-    "sale": """【角色定义】
-你是一个车险售前助手，帮助用户计算保费和推荐投保方案。
-
-【职责边界】
-- 计算保费（需要车型、年龄、驾龄）
-- 推荐适合的投保方案
-- 解释报价相关的条款
-
-【行为规则】
-- 当用户询问保险条款相关问题时，必须调用 search_insurance_terms 工具检索，禁止凭自身知识直接回答。
-- 优先从对话历史中复用已提供的信息（车型、年龄、驾龄）
-- 信息缺失时，向用户确认后再计算
-- 报价结果包含保额和险种建议
-
-【输出风格】
-清晰、直接，给出具体数字和推荐方案。
-
-【拒绝边界】
-超出报价范围的咨询，引导用户咨询售后或转人工。""",
-
-    "service": """【角色定义】
-你是一个车险售后助手，帮助用户处理保单查询、保险条款查询和投诉转接。
-
-【职责边界】
-- 查询保单信息
-- 解释保险条款
-- 转接人工客服
-
-【行为规则】
-- 当用户询问保险条款相关问题时，必须调用 search_insurance_terms 工具检索，禁止凭自身知识直接回答。
-- 优先从对话历史中复用已提供的信息（身份证号、保单号）
-- 信息缺失时，向用户确认后再查询
-
-【输出风格】
-专业、简洁、直接。
-
-【拒绝边界】
-超出车险范围的咨询，引导用户转人工处理。""",
-}
 
 # 各 Agent 绑定的工具集
 AGENT_TOOLS = {
-    "general": [transfer_to_human],
-    "sale": [calculate_premium, search_insurance_terms],
-    "service": [query_policy, search_insurance_terms, transfer_to_human],
+    INTENT_GENERAL: [transfer_to_human],
+    INTENT_SALE: [calculate_premium, search_insurance_terms],
+    INTENT_SERVICE: [query_policy, search_insurance_terms, transfer_to_human],
 }
 
 # 全部工具的去重集合（供 ToolNode 使用）
@@ -272,11 +234,21 @@ class GraphState(TypedDict):
     """编排图的状态定义"""
     messages: Annotated[list, add_messages]
     agent_type: str          # 当前 Agent 类型：general / sale / service
-    responder_input: list    # 纯净输入（用户消息 + 工具结果，不含 Planner 内部 AIMessage）
+    responder_input: list    # 纯净输入（prepare_input 节点构建，供 planner + responder 使用）
     direct_response: Optional[str]  # 短路直返内容：非空时跳过 planner → responder，直接返回给前端
     route: str
     reply: str
     summary: Optional[str]   # 长期记忆摘要（由 SummarizationNode 生成）
+    # ---- Router 四层漏斗状态 ----
+    action: str              # route / clarify / handoff
+    clarify_count: int       # 连续澄清次数
+    waiting_clarification: bool    # 是否正在等待澄清回答
+    last_clarify_options: list     # 上次澄清的选项列表
+    router_source: Optional[str]   # 决策来源层
+    router_confidence: float       # 决策置信度
+    # ---- DST 状态 ----
+    current_task: Optional[str]    # 当前未完成任务：sale / service / None
+    awaiting_slot: Optional[str]   # 当前等待补充的参数名（如 id_card）
 
 
 # ============================================================
@@ -294,83 +266,156 @@ def _create_summarization_node(llm):
     )
 
 
-def _make_router_node():
+def _build_responder_input(messages: list, summary: Optional[str] = None) -> list:
     """
-    路由节点：纯关键词规则判断 + 构建纯净的 responder_input。
+    从原始消息序列构建 responder 的纯净输入。
+    规则：
+    - 保留 HumanMessage + 有内容的 AIMessage（过滤 tool_calls 和空 AIMessage）
+    - 如有 summary，前置 SystemMessage 并只取最近 6 条消息
+    - 工具调用对由 tools_node 负责追加，此处不做配对
     """
-    from src.core.routing import decide_route
+    result = []
+
+    if summary:
+        result.append(SystemMessage(content=f"【用户长期记忆摘要】{summary}"))
+        recent_count = 6
+        source_messages = messages[-recent_count:] if len(messages) > recent_count else messages
+    else:
+        source_messages = messages
+
+    for msg in source_messages:
+        if isinstance(msg, HumanMessage):
+            result.append(msg)
+        elif isinstance(msg, AIMessage) and not getattr(msg, 'tool_calls', None) and msg.content:
+            result.append(msg)
+
+    return result
+
+
+def _make_router_node(llm_classifier, llm_reviewer):
+    """
+    路由节点：L0 安全拦截 → DST 跨轮承接 → L1 关键词 → L2 小模型 → L3 大模型复核 → L4 澄清/转人工
+    负责路由决策 + DST 状态管理（current_task / awaiting_slot）。
+    """
+    from src.router.router import route_message, RouterConfig, compute_new_router_state
+    from src.router.schemas import RouterState as RS
+
+    _SOURCE_LABELS = {
+        SOURCE_L0_SAFETY: "L0-安全拦截",
+        SOURCE_DST: "DST-跨轮承接",
+        SOURCE_L1_KEYWORD: "L1-关键词",
+        SOURCE_L2: "L2-小模型",
+        SOURCE_L3: "L3-大模型复核",
+        SOURCE_L4_CLARIFY: "L4-澄清",
+        SOURCE_L4_HANDOFF: "L4-转人工",
+    }
 
     def router_node(state: GraphState, config: RunnableConfig) -> dict:
-        start_time = time.time()
         session_id = config.get("configurable", {}).get("thread_id", "default")
         messages = state.get("messages", [])
         summary = state.get("summary", None)
 
+        # 读取 DST 状态
+        current_task = state.get("current_task")
+        awaiting_slot = state.get("awaiting_slot")
+
+        # 默认返回值（空消息时）
+        default_return = {
+            "agent_type": Route.GENERAL.value,
+            "route": Route.GENERAL.value,
+            "responder_input": [],
+            "direct_response": None,
+            "summary": summary,
+            "action": ACTION_ROUTE,
+            "clarify_count": 0,
+            "waiting_clarification": False,
+            "last_clarify_options": [],
+            "router_source": None,
+            "router_confidence": 0.0,
+            "current_task": None,
+            "awaiting_slot": None,
+        }
+
         if not messages:
-            return {
-                "agent_type": Route.GENERAL.value,
-                "route": Route.GENERAL.value,
-                "responder_input": [],
-                "direct_response": None,
-                "summary": summary,
-            }
+            return default_return
 
         last_msg = messages[-1]
         content = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
 
-        route = decide_route(session_id, content)
-        agent_type = route.value
+        # 构建 Router 状态（含 DST 字段）
+        router_state = RS(
+            clarify_count=state.get("clarify_count", 0),
+            waiting_clarification=state.get("waiting_clarification", False),
+            last_clarify_options=state.get("last_clarify_options", []),
+            current_task=current_task,
+            awaiting_slot=awaiting_slot,
+        )
 
-        responder_input = []
+        # 调用路由器（内部处理 L0 → DST → L1 → L2 → L3 → L4）
+        result = route_message(
+            message=content,
+            router_state=router_state,
+            llm_classifier=llm_classifier,
+            llm_reviewer=llm_reviewer,
+        )
 
-        # ---- 构建核心上下文 ----
-        if summary:
-            responder_input.append(SystemMessage(content=f"【用户长期记忆摘要】{summary}"))
-            recent_count = 6
-            recent_messages = messages[-recent_count:] if len(messages) > recent_count else messages
-            for msg in recent_messages:
-                if isinstance(msg, HumanMessage):
-                    responder_input.append(msg)
-                elif isinstance(msg, AIMessage) and not getattr(msg, 'tool_calls', None) and msg.content:
-                    responder_input.append(msg)
+        # 计算新的澄清状态
+        new_rs = compute_new_router_state(result, router_state)
+
+        # ---- DST 状态管理 ----
+        # 规则：awaiting_slot != None → 保留 current_task；awaiting_slot == None → 清空 current_task
+        new_current_task = current_task
+        new_awaiting_slot = awaiting_slot
+
+        if result.source == SOURCE_DST:
+            # DST 命中：保持 current_task 和 awaiting_slot 不变
+            pass
+        elif result.action == ACTION_ROUTE and result.intent in (INTENT_SALE, INTENT_SERVICE):
+            # 新业务开始：设置 current_task，awaiting_slot 由 tools_node 后续设置
+            new_current_task = result.intent
+            new_awaiting_slot = None
         else:
-            for msg in messages:
-                if isinstance(msg, HumanMessage):
-                    responder_input.append(msg)
-                elif isinstance(msg, AIMessage) and not getattr(msg, 'tool_calls', None) and msg.content:
-                    responder_input.append(msg)
+            # handoff / clarify / general → 清空 DST
+            new_current_task = None
+            new_awaiting_slot = None
 
-        # ---- 加入最近一次工具调用对（如有） ----
-        last_tool_msg = None
-        last_tool_call_ai = None
-        for msg in reversed(messages):
-            if isinstance(msg, ToolMessage):
-                last_tool_msg = msg
-                break
-        if last_tool_msg:
-            tool_call_id = getattr(last_tool_msg, 'tool_call_id', None)
-            if tool_call_id:
-                for msg in messages:
-                    if isinstance(msg, AIMessage) and getattr(msg, 'tool_calls', None):
-                        for tc in msg.tool_calls:
-                            if tc.get('id') == tool_call_id:
-                                last_tool_call_ai = msg
-                                break
-                        if last_tool_call_ai:
-                            break
-            if last_tool_call_ai:
-                ai_copy = AIMessage(content="", tool_calls=last_tool_call_ai.tool_calls)
-                responder_input.append(ai_copy)
-                responder_input.append(last_tool_msg)
-            else:
-                logger.warning("丢弃孤立的 ToolMessage，缺少对应的 AIMessage(tool_calls)")
+        # 路由决策日志
+        source_label = _SOURCE_LABELS.get(result.source, result.source)
+        logger.info(
+            "[路由] %s | intent=%s | confidence=%.2f | action=%s | msg='%s' | dst=(task=%s, slot=%s)",
+            source_label, result.intent, result.confidence, result.action, content[:50],
+            new_current_task, new_awaiting_slot,
+        )
+
+        # 确定 agent_type 和 direct_response
+        agent_type = result.intent if result.intent in INTENT_VALUES else INTENT_GENERAL
+        direct_response = None
+
+        if result.action == ACTION_HANDOFF:
+            ticket_id = f"TK{int(time.time())}{session_id[-4:]}"
+            direct_response = json.dumps({
+                "transfer": True,
+                "ticket_id": ticket_id,
+                "message": "正在为您转接人工客服，工单号：" + ticket_id,
+            }, ensure_ascii=False)
+        elif result.action == ACTION_CLARIFY:
+            from src.router.l4_fallback import build_clarify_message
+            direct_response = build_clarify_message(result.clarify_options)
 
         return {
             "agent_type": agent_type,
             "route": agent_type,
-            "responder_input": responder_input,
-            "direct_response": None,
+            "responder_input": [],
+            "direct_response": direct_response,
             "summary": summary,
+            "action": result.action,
+            "clarify_count": new_rs["clarify_count"],
+            "waiting_clarification": new_rs["waiting_clarification"],
+            "last_clarify_options": new_rs["last_clarify_options"],
+            "router_source": result.source,
+            "router_confidence": result.confidence,
+            "current_task": new_current_task,
+            "awaiting_slot": new_awaiting_slot,
         }
 
     return router_node
@@ -380,7 +425,7 @@ def _make_planner_node(llm):
     """决策节点：非流式调用 LLM，决定是否调用工具。"""
     def planner_node(state: GraphState, config: RunnableConfig) -> dict:
         agent_type = state.get("agent_type", Route.GENERAL.value)
-        system_prompt = SYSTEM_PROMPTS.get(agent_type, SYSTEM_PROMPTS[Route.GENERAL.value])
+        system_prompt = AGENT_SYSTEM_PROMPTS.get(agent_type, AGENT_SYSTEM_PROMPTS[INTENT_GENERAL])
         tools = AGENT_TOOLS.get(agent_type, [])
         messages = list(state.get("messages", []))
         # 过滤掉空的 AIMessage（planner 历史遗留），避免浪费 token
@@ -393,6 +438,15 @@ def _make_planner_node(llm):
         else:
             result = llm.invoke(full_messages)
 
+        # 日志：planner 返回内容
+        tool_calls = getattr(result, 'tool_calls', None) or []
+        if tool_calls:
+            tool_names = [tc.get('name', '?') for tc in tool_calls]
+            logger.info("[Planner] 调用工具: %s (agent=%s, %d个工具)", tool_names, agent_type, len(tool_calls))
+        else:
+            content_preview = (result.content or '')[:80]
+            logger.info("[Planner] 不调工具, 直接回复 (agent=%s, content='%s')", agent_type, content_preview)
+
         result.content = ""  # 强制清空 content，防止废话污染历史
 
         return {"messages": [result]}
@@ -401,14 +455,11 @@ def _make_planner_node(llm):
 
 
 def _make_tools_node():
-    """工具执行节点：执行工具 + 更新 responder_input + 短路直返。"""
+    """工具执行节点：执行工具 + 解析结构化结果 + 管理 DST 状态。"""
     tool_node = ToolNode(ALL_TOOLS)
 
     def _tools_node(state: GraphState, config: RunnableConfig) -> dict:
-        result = tool_node.invoke(state)
-
-        new_responder = list(state.get("responder_input", []))
-
+        # 日志：进入工具节点
         messages = state.get("messages", [])
         last_ai = None
         for msg in reversed(messages):
@@ -416,21 +467,105 @@ def _make_tools_node():
                 last_ai = msg
                 break
         if last_ai:
+            tool_names = [tc.get('name', '?') for tc in last_ai.tool_calls]
+            logger.info("[Tools] 进入工具节点, 执行: %s", tool_names)
+        else:
+            logger.warning("[Tools] 进入工具节点, 但未找到 AIMessage(tool_calls)")
+
+        result = tool_node.invoke(state)
+
+        new_responder = list(state.get("responder_input", []))
+
+        if last_ai:
             new_responder.append(AIMessage(content="", tool_calls=last_ai.tool_calls))
+
+        # DST 状态更新变量
+        dst_current_task = state.get("current_task")
+        dst_awaiting_slot = state.get("awaiting_slot")
 
         for msg in result.get("messages", []):
             content = getattr(msg, 'content', '')
+            tool_name = getattr(msg, 'name', '')
+
+            # ---- 转人工信号 ----
             if TRANSFER_SIGNAL in str(content):
                 clean_content = str(content).replace(TRANSFER_SIGNAL, "已提交转人工请求")
                 new_responder.append(ToolMessage(
                     content=clean_content,
                     tool_call_id=getattr(msg, 'tool_call_id', ''),
-                    name=getattr(msg, 'name', ''),
+                    name=tool_name,
                 ))
-            else:
-                new_responder.append(msg)
+                continue
+
+            # ---- 结构化结果解析（query_policy 返回 JSON） ----
+            if tool_name == "query_policy":
+                try:
+                    parsed = json.loads(str(content))
+                    if isinstance(parsed, dict) and "status" in parsed:
+                        status = parsed["status"]
+
+                        if status == "missing_params":
+                            # 工具缺参数 → 设置 awaiting_slot
+                            missing = parsed.get("missing", [])
+                            if missing:
+                                dst_awaiting_slot = missing[0]
+                                logger.info("[Tools] 工具缺参数, awaiting_slot=%s", dst_awaiting_slot)
+                            # 转为可读文本给 LLM
+                            readable = f"缺少以下参数：{', '.join(missing)}，请向用户询问后重新查询。"
+                            new_responder.append(ToolMessage(
+                                content=readable,
+                                tool_call_id=getattr(msg, 'tool_call_id', ''),
+                                name=tool_name,
+                            ))
+                            continue
+
+                        elif status == "success":
+                            # 工具成功 → 清除 DST
+                            dst_current_task = None
+                            dst_awaiting_slot = None
+                            logger.info("[Tools] 工具成功, 清除 DST")
+                            # 转为可读文本给 LLM
+                            data = parsed.get("data", {})
+                            readable = (
+                                f"✅ 保单查询成功\n"
+                                f"保单号：{data.get('保单号', '')}\n"
+                                f"车主：{data.get('车主', '')}\n"
+                                f"车型：{data.get('车型', '')}\n"
+                                f"险种：{data.get('险种', '')}\n"
+                                f"保额：{data.get('保额', '')}\n"
+                                f"年保费：{data.get('年保费', '')}\n"
+                                f"到期日：{data.get('到期日', '')}\n"
+                                f"状态：{data.get('状态', '')}"
+                            )
+                            new_responder.append(ToolMessage(
+                                content=readable,
+                                tool_call_id=getattr(msg, 'tool_call_id', ''),
+                                name=tool_name,
+                            ))
+                            continue
+
+                        elif status == "error":
+                            # 工具错误（未找到等） → 清除 DST
+                            dst_current_task = None
+                            dst_awaiting_slot = None
+                            readable = f"❌ {parsed.get('message', '查询失败')}"
+                            new_responder.append(ToolMessage(
+                                content=readable,
+                                tool_call_id=getattr(msg, 'tool_call_id', ''),
+                                name=tool_name,
+                            ))
+                            continue
+                except (json.JSONDecodeError, TypeError):
+                    pass  # 非 JSON，按普通文本处理
+
+            # ---- 普通工具结果 ----
+            new_responder.append(msg)
 
         result["responder_input"] = new_responder
+
+        # 更新 DST 状态
+        result["current_task"] = dst_current_task
+        result["awaiting_slot"] = dst_awaiting_slot
 
         # 短路逻辑：特定工具结果可直接返回，跳过 planner → responder 链路
         direct_response = None
@@ -460,8 +595,16 @@ def _make_tools_node():
 
 def _make_responder_node(llm):
     async def responder_node(state: GraphState, config: RunnableConfig) -> dict:
+        # 短路：direct_response 已设置（clarify/handoff），跳过 LLM
+        direct_response = state.get("direct_response")
+        if direct_response:
+            return {
+                "messages": [AIMessage(content=direct_response)],
+                "reply": direct_response,
+            }
+
         agent_type = state.get("agent_type", Route.GENERAL.value)
-        system_prompt = SYSTEM_PROMPTS.get(agent_type, SYSTEM_PROMPTS[Route.GENERAL.value])
+        system_prompt = AGENT_SYSTEM_PROMPTS.get(agent_type, AGENT_SYSTEM_PROMPTS[INTENT_GENERAL])
         responder_input = list(state.get("responder_input", []))
 
         full_messages = [SystemMessage(content=system_prompt)] + responder_input
@@ -479,6 +622,29 @@ def _make_responder_node(llm):
     return responder_node
 
 
+def _make_prepare_input_node():
+    """输入准备节点：从 messages + summary 构建纯净的 responder_input。
+    位于 router 和 planner 之间，确保 planner 和 responder 都使用准备好的数据。
+    """
+    def prepare_input_node(state: GraphState) -> dict:
+        messages = state.get("messages", [])
+        summary = state.get("summary", None)
+        responder_input = _build_responder_input(messages, summary)
+        return {"responder_input": responder_input}
+
+    return prepare_input_node
+
+
+def _router_condition(state: GraphState) -> str:
+    """Router 节点后的条件边：根据 action 决定下一步"""
+    action = state.get("action", ACTION_ROUTE)
+    if action == ACTION_HANDOFF:
+        return "end"
+    if action == ACTION_CLARIFY:
+        return "responder"
+    return "prepare_input"
+
+
 def _planner_condition(state: GraphState) -> str:
     """条件边：planner → tools（有 tool_calls） 或 responder（无 tool_calls）"""
     messages = state.get("messages", [])
@@ -486,7 +652,10 @@ def _planner_condition(state: GraphState) -> str:
         return "responder"
     last_msg = messages[-1]
     if hasattr(last_msg, 'tool_calls') and last_msg.tool_calls:
+        tool_names = [tc.get('name', '?') for tc in last_msg.tool_calls]
+        logger.info("[Planner→Tools] 路由到工具节点: %s", tool_names)
         return "tools"
+    logger.info("[Planner→Responder] 路由到回复节点（无工具调用）")
     return "responder"
 
 
@@ -504,7 +673,7 @@ def _after_tools_condition(state: GraphState) -> str:
 def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
     """
     初始化手写 StateGraph 编排图，返回编译后的图。
-    图结构: START → router → planner ⇄ tools → responder → END
+    图结构: START → router → prepare_input → planner ⇄ tools → responder → END
     """
     global _rag_llm
 
@@ -555,8 +724,36 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
     # ---------- 共享 Memory ----------
     memory = MemorySaver()
 
-    # ---------- 创建 4 个节点 ----------
-    router_node = _make_router_node()
+    # ---------- 创建 L2 分类器 LLM 和 L3 复核 LLM ----------
+    classifier_model = os.environ.get("ROUTER_CLASSIFIER_MODEL", model_name)
+    reviewer_model = os.environ.get("ROUTER_REVIEWER_MODEL", model_name)
+
+    # L2 分类器支持独立的 API（如千问、GLM 等 OpenAI 兼容接口）
+    classifier_api_key = os.environ.get("ROUTER_CLASSIFIER_API_KEY", api_key)
+    classifier_base_url = os.environ.get("ROUTER_CLASSIFIER_BASE_URL", "https://api.deepseek.com/v1")
+
+    llm_classifier = ChatOpenAI(
+        model=classifier_model,
+        api_key=classifier_api_key,
+        base_url=classifier_base_url,
+        temperature=0.1,
+        max_retries=1,
+        http_client=http_client,
+    )
+    llm_reviewer = ChatOpenAI(
+        model=reviewer_model,
+        api_key=api_key,
+        base_url="https://api.deepseek.com/v1",
+        temperature=0,
+        max_retries=1,
+        http_client=http_client,
+    )
+
+    logger.info("Router LLM: classifier=%s@%s, reviewer=%s@deepseek", classifier_model, classifier_base_url, reviewer_model)
+
+    # ---------- 创建 5 个节点 ----------
+    router_node = _make_router_node(llm_classifier, llm_reviewer)
+    prepare_input_node = _make_prepare_input_node()
     planner_node = _make_planner_node(llm)
     tools_node = _make_tools_node()
     responder_node = _make_responder_node(llm)
@@ -566,12 +763,23 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
     builder = StateGraph(GraphState)
 
     builder.add_node("router", router_node)
+    builder.add_node("prepare_input", prepare_input_node)
     builder.add_node("planner", planner_node)
     builder.add_node("tools", tools_node)
     builder.add_node("responder", responder_node)
 
     builder.add_edge(START, "router")
-    builder.add_edge("router", "planner")
+    builder.add_conditional_edges(
+        "router",
+        _router_condition,
+        {
+            "prepare_input": "prepare_input",
+            "responder": "responder",
+            "end": END,
+        }
+    )
+
+    builder.add_edge("prepare_input", "planner")
 
     builder.add_conditional_edges(
         "planner",
@@ -596,7 +804,7 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
     graph = builder.compile(checkpointer=memory)
 
     logger.info("✅ StateGraph 编排图构建完成")
-    logger.info("📊 图结构: START → router → planner ⇄ tools → responder → END")
+    logger.info("📊 图结构: START → router(L0-L4) → prepare_input → planner ⇄ tools → responder → END")
 
     return graph, llm
 

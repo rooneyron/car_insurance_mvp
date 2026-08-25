@@ -139,6 +139,20 @@ def create_gradio_interface():
             if last_metadata and last_metadata.get("route"):
                 route = Route(last_metadata["route"])
                 label = ROUTE_LABELS.get(route, "")
+                # 显示决策层 + 分数
+                source = last_metadata.get("router_source", "")
+                confidence = last_metadata.get("router_confidence", 0.0)
+                layer_map = {
+                    "l0_safety": "L0",
+                    "l1_keyword": "L1",
+                    "l2": "L2",
+                    "l3": "L3",
+                    "l4_clarify": "L4",
+                    "l4_handoff": "L4",
+                }
+                layer = layer_map.get(source, "")
+                if layer:
+                    label = f"{label} ({layer}, {confidence:.2f})"
                 if label:
                     current = chat_history[assistant_idx]["content"]
                     chat_history[assistant_idx]["content"] = f"<small>{label}</small>\n\n{current}"
