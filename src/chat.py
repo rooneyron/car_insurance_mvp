@@ -394,12 +394,16 @@ async def _chat_api_stream_inner(session_id: str, message: str):
         # ---------- 后处理 ----------
         transfer = False
 
-        # 检查是否有短路直返（direct_response 非空 = 特定工具结果直接返回，跳过 planner → responder）
+        # 从 final_state 读取路由信息（比事件流更可靠）
         try:
             final_state = state.graph.get_state(config).values
             direct_response = final_state.get("direct_response")
+            router_source = final_state.get("router_source")
+            router_confidence = final_state.get("router_confidence", 0.0)
         except Exception:
             direct_response = None
+            router_source = None
+            router_confidence = 0.0
 
         if direct_response:
             if direct_response.startswith("{"):
@@ -430,6 +434,8 @@ async def _chat_api_stream_inner(session_id: str, message: str):
             "route": route.value,
             "transfer": transfer,
             "elapsed_ms": elapsed_ms,
+            "router_source": router_source,
+            "router_confidence": router_confidence,
         }
         yield current_text, metadata
 
