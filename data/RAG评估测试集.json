@@ -1,0 +1,182 @@
+[
+  {
+    "query": "车损险保哪些责任",
+    "relevant_chunk_ids": [5, 6, 7],
+    "category": "简称查询",
+    "expected_article": "第六条、第七条、第八条（车损险保险责任，含自然灾害/意外事故、盗抢、施救费用）"
+  },
+  {
+    "query": "三者险赔多少",
+    "relevant_chunk_ids": [24, 28],
+    "category": "简称查询",
+    "expected_article": "第二十五条（责任限额）、第二十九条（赔款计算公式）"
+  },
+  {
+    "query": "车上人员险保什么",
+    "relevant_chunk_ids": [30],
+    "category": "简称查询",
+    "expected_article": "第三十一条（车上人员险保险责任）"
+  },
+  {
+    "query": "交强险赔多少",
+    "relevant_chunk_ids": [108],
+    "category": "简称查询",
+    "expected_article": "交强险第八条（死亡伤残18万/医疗1.8万/财产2000元）"
+  },
+  {
+    "query": "车损险怎么理赔",
+    "relevant_chunk_ids": [13, 14, 17],
+    "category": "简称查询",
+    "expected_article": "第十四条（赔偿方式）、第十五条（修理前检验）、第十八条（赔款计算公式）"
+  },
+  {
+    "query": "三者险什么情况不赔",
+    "relevant_chunk_ids": [21, 22, 23],
+    "category": "简称查询",
+    "expected_article": "第二十二、二十三、二十四条（三者险责任免除）"
+  },
+  {
+    "query": "机动车损失保险的保险责任有哪些",
+    "relevant_chunk_ids": [5, 6, 7],
+    "category": "全称查询",
+    "expected_article": "第六条、第七条、第八条（车损险保险责任）"
+  },
+  {
+    "query": "机动车第三者责任保险的责任限额",
+    "relevant_chunk_ids": [24, 25],
+    "category": "全称查询",
+    "expected_article": "第二十五条（责任限额协商确定）、第二十六条（主挂车连接使用）"
+  },
+  {
+    "query": "机动车车上人员责任保险赔款怎么算",
+    "relevant_chunk_ids": [36],
+    "category": "全称查询",
+    "expected_article": "第三十七条（车上人员险赔款计算公式）"
+  },
+  {
+    "query": "机动车交通事故责任强制保险赔偿限额",
+    "relevant_chunk_ids": [108],
+    "category": "全称查询",
+    "expected_article": "交强险第八条（各分项赔偿限额）"
+  },
+  {
+    "query": "车损险的保险金额怎么确定",
+    "relevant_chunk_ids": [12],
+    "category": "通用条款",
+    "expected_article": "第十三条（按实际价值确定，新车购置价减折旧）"
+  },
+  {
+    "query": "绝对免赔额是什么",
+    "relevant_chunk_ids": [11],
+    "category": "通用条款",
+    "expected_article": "第十二条（绝对免赔额约定，每次事故增加免赔）"
+  },
+  {
+    "query": "保险期间是多久",
+    "relevant_chunk_ids": [38, 111],
+    "category": "通用条款",
+    "expected_article": "商业险第三十九条 + 交强险第十一条（均为一年）"
+  },
+  {
+    "query": "退保怎么退",
+    "relevant_chunk_ids": [46],
+    "category": "通用条款",
+    "expected_article": "第四十七条（保险责任开始前收3%手续费，开始后按日收取）"
+  },
+  {
+    "query": "车损险酒驾赔吗",
+    "relevant_chunk_ids": [8],
+    "category": "责任免除",
+    "expected_article": "第九条（驾驶人饮酒属于责任免除）"
+  },
+  {
+    "query": "车损险什么情况不赔",
+    "relevant_chunk_ids": [8, 9, 10],
+    "category": "责任免除",
+    "expected_article": "第九、十、十一条（车损险责任免除三类情形）"
+  },
+  {
+    "query": "交强险什么情况不赔",
+    "relevant_chunk_ids": [110],
+    "category": "责任免除",
+    "expected_article": "交强险第十条（受害人故意、本车财产、间接损失、诉讼费用）"
+  },
+  {
+    "query": "车上人员险什么情况不赔",
+    "relevant_chunk_ids": [32, 33, 34],
+    "category": "责任免除",
+    "expected_article": "第三十三、三十四、三十五条（车上人员险责任免除）"
+  },
+  {
+    "query": "车损险赔款怎么计算",
+    "relevant_chunk_ids": [17],
+    "category": "赔偿处理",
+    "expected_article": "第十八条（全部损失/部分损失/施救费三种计算公式）"
+  },
+  {
+    "query": "三者险赔款怎么计算",
+    "relevant_chunk_ids": [28],
+    "category": "赔偿处理",
+    "expected_article": "第二十九条（高于/低于责任限额两种计算公式）"
+  },
+  {
+    "query": "交强险索赔需要什么材料",
+    "relevant_chunk_ids": [118],
+    "category": "赔偿处理",
+    "expected_article": "交强险第十八条（保险单、索赔申请书、身份证明、事故证明等7项）"
+  },
+  {
+    "query": "出险后多久内要报案",
+    "relevant_chunk_ids": [39],
+    "category": "赔偿处理",
+    "expected_article": "第四十条（48小时内通知保险人，盗抢24小时内报公安）"
+  },
+  {
+    "query": "车被偷了车损险赔吗",
+    "relevant_chunk_ids": [6],
+    "category": "边界case",
+    "expected_article": "第七条（全车盗抢，立案满60天未查明下落负责赔偿）"
+  },
+  {
+    "query": "主车挂车一起出险三者险怎么赔",
+    "relevant_chunk_ids": [25],
+    "category": "边界case",
+    "expected_article": "第二十六条（主挂车视为一体，按责任限额比例分摊）"
+  },
+  {
+    "query": "附加险能单独买吗？",
+    "relevant_chunk_ids": [0],
+    "category": "通用条款",
+    "expected_article": "第一条（附加险不能独立投保，需附加于主险）"
+  },
+  {
+    "query": "车被划痕了，车损险赔吗？",
+    "relevant_chunk_ids": [10],
+    "category": "责任免除",
+    "expected_article": "第十一条（无明显碰撞痕迹的车身划痕，保险人不负责赔偿，需投保附加划痕险）"
+  },
+  {
+    "query": "三者险能赔医保外用药吗？",
+    "relevant_chunk_ids": [23],
+    "category": "责任免除",
+    "expected_article": "第二十四条（超出国家基本医疗保险同类医疗费用标准的费用部分，保险人不负责赔偿，需投保附加医保外用药责任险）"
+  },
+  {
+    "query": "对方不赔钱，我能找自己保险公司赔吗？",
+    "relevant_chunk_ids": [16],
+    "category": "赔偿处理",
+    "expected_article": "第十七条（代位求偿：被保险人可直接向本保险人索赔，保险人在赔偿金额内代位行使被保险人对第三方请求赔偿的权利）"
+  },
+  {
+    "query": "交强险垫付的抢救费能追回来吗？",
+    "relevant_chunk_ids": [109],
+    "category": "赔偿处理",
+    "expected_article": "交强险第九条（对于垫付的抢救费用，保险人有权向致害人追偿）"
+  },
+  {
+    "query": "车卖了过户，保险还有效吗？",
+    "relevant_chunk_ids": [45],
+    "category": "通用条款",
+    "expected_article": "第四十六条（被保险机动车转让他人的，受让人承继被保险人的权利和义务，应及时办理变更手续）"
+  }
+]

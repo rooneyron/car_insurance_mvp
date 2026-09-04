@@ -37,10 +37,22 @@ from src.rag import search_terms, retrieve_candidates
 # 1. 工具业务逻辑（纯 Python，与 LangChain 解耦）
 # ============================================================
 
-def calculate_premium_logic(car_model: str, driver_age: int, years_driving: int) -> str:
+def calculate_premium_logic(car_model: Optional[str] = None, driver_age: Optional[int] = None, years_driving: Optional[int] = None) -> dict:
     """
-    保费估算核心逻辑
+    保费估算核心逻辑。
+    返回结构化结果：success / missing_params（与 query_policy 契约一致，供 tools_node 写入 DST awaiting_slot）
     """
+    # 参数验证
+    missing = []
+    if not car_model:
+        missing.append("car_model")
+    if driver_age is None:
+        missing.append("driver_age")
+    if years_driving is None:
+        missing.append("years_driving")
+    if missing:
+        return {"status": "missing_params", "missing": missing}
+
     base_premium = 5000
     if "特斯拉" in car_model or "宝马" in car_model or "奔驰" in car_model:
         base_premium = 8000
@@ -67,13 +79,16 @@ def calculate_premium_logic(car_model: str, driver_age: int, years_driving: int)
 
     final_premium = base_premium * age_factor * driving_factor
 
-    return (
-        f"🚗 保费估算结果\n"
-        f"车型：{car_model}\n"
-        f"驾驶员年龄：{driver_age} 岁\n"
-        f"驾龄：{years_driving} 年\n"
-        f"预估年保费：{final_premium:.0f} 元"
-    )
+    return {
+        "status": "success",
+        "message": (
+            f"🚗 保费估算结果\n"
+            f"车型：{car_model}\n"
+            f"驾驶员年龄：{driver_age} 岁\n"
+            f"驾龄：{years_driving} 年\n"
+            f"预估年保费：{final_premium:.0f} 元"
+        ),
+    }
 
 
 def query_policy_logic(policy_id: Optional[str] = None, id_card: Optional[str] = None) -> dict:
@@ -127,39 +142,22 @@ def _get_rag_llm() -> ChatOpenAI:
 def search_insurance_terms_logic(query: str) -> str:
     """
     RAG 检索条款核心逻辑。
-    根据环境变量 USE_LOCAL_RERANK 决定使用本地 Rerank 还是 LLM 重排。
+    统一走 hybrid_search 召回 + 精排（本地 Cross-Encoder / 生产 DashScope Rerank）。
     """
     use_local_rerank = os.environ.get("USE_LOCAL_RERANK", "true").lower() == "true"
-    logger.info("🔍 [RAG工具] query='%s' | mode=%s", query, "本地Rerank" if use_local_rerank else "LLM重排")
+    logger.info("🔍 [RAG工具] query='%s' | rerank=%s", query, "CrossEncoder" if use_local_rerank else "qwen3-rerank")
 
     try:
-        if use_local_rerank:
-            # ====== 本地模式：FAISS + Rerank ======
-            results = search_terms(query, top_k=2)
-            if not results or results == [RAG_EMPTY_RESULT]:
-                logger.info("🔍 [RAG工具] 返回: 未检索到相关保险条款")
-                return "未检索到相关保险条款。"
+        results = search_terms(query, top_k=3)
+        if not results or results == [RAG_EMPTY_RESULT]:
+            logger.info("🔍 [RAG工具] 未检索到相关保险条款")
+            return "未检索到相关保险条款。"
 
-            output = f"📄 关于「{query}」的相关条款（已智能排序）：\n\n"
-            for i, result in enumerate(results, 1):
-                output += f"--- 结果 {i} ---\n{result}\n\n"
-            logger.info("🔍 [RAG工具] 返回 %d 条结果:\n%s", len(results), output[:500])
-            return output
-
-        else:
-            # ====== 生产模式：FAISS 召回 + LLM 相关性分类（由 rag.py 内部处理） ======
-            # 注意：这里传入 llm 实例给 search_terms
-            llm = _get_rag_llm()
-            results = search_terms(query, top_k=2, llm=llm)
-            if not results or results == [RAG_EMPTY_RESULT]:
-                logger.info("🔍 [RAG工具] 生产模式返回: 未检索到相关保险条款")
-                return "未检索到相关保险条款。"
-
-            output = f"📄 关于「{query}」的相关条款（已智能排序）：\n\n"
-            for i, result in enumerate(results, 1):
-                output += f"--- 结果 {i} ---\n{result}\n\n"
-            logger.info("🔍 [RAG工具] 生产模式 LLM重排返回 %d 条:\n%s", len(results), output[:500])
-            return output
+        output = f"📄 关于「{query}」的相关条款（已智能排序）：\n\n"
+        for i, result in enumerate(results, 1):
+            output += f"--- 结果 {i} ---\n{result}\n\n"
+        logger.info("🔍 [RAG工具] 返回 %d 条结果:\n%s", len(results), output[:500])
+        return output
 
     except Exception as e:
         logger.error("🔍 [RAG工具] 异常: %s", e)
@@ -178,9 +176,11 @@ def transfer_to_human_logic(reason: str) -> str:
 # ============================================================
 
 @tool
-def calculate_premium(car_model: str, driver_age: int, years_driving: int) -> str:
-    """估算车险保费。在用户询问保费、报价、投保费用时调用。参数：car_model（车型）、driver_age（驾驶员年龄）、years_driving（驾龄）"""
-    return calculate_premium_logic(car_model, driver_age, years_driving)
+def calculate_premium(car_model: Optional[str] = None, driver_age: Optional[int] = None, years_driving: Optional[int] = None) -> str:
+    """估算车险保费。在用户询问保费、报价、投保费用时调用。参数：car_model（车型）、driver_age（驾驶员年龄）、years_driving（驾龄）。即使参数不全也请调用，工具会返回缺少哪些参数。"""
+    result = calculate_premium_logic(car_model, driver_age, years_driving)
+    # 工具返回结构化 dict，由 tools_node 解析处理
+    return json.dumps(result, ensure_ascii=False)
 
 
 @tool
@@ -210,7 +210,7 @@ def transfer_to_human(reason: str) -> str:
 # 各 Agent 绑定的工具集
 AGENT_TOOLS = {
     INTENT_GENERAL: [transfer_to_human],
-    INTENT_SALE: [calculate_premium, search_insurance_terms],
+    INTENT_SALE: [calculate_premium, search_insurance_terms, transfer_to_human],
     INTENT_SERVICE: [query_policy, search_insurance_terms, transfer_to_human],
 }
 
@@ -497,8 +497,8 @@ def _make_tools_node():
                 ))
                 continue
 
-            # ---- 结构化结果解析（query_policy 返回 JSON） ----
-            if tool_name == "query_policy":
+            # ---- 结构化结果解析（query_policy / calculate_premium 返回 JSON） ----
+            if tool_name in ("query_policy", "calculate_premium"):
                 try:
                     parsed = json.loads(str(content))
                     if isinstance(parsed, dict) and "status" in parsed:
@@ -524,19 +524,22 @@ def _make_tools_node():
                             dst_current_task = None
                             dst_awaiting_slot = None
                             logger.info("[Tools] 工具成功, 清除 DST")
-                            # 转为可读文本给 LLM
-                            data = parsed.get("data", {})
-                            readable = (
-                                f"✅ 保单查询成功\n"
-                                f"保单号：{data.get('保单号', '')}\n"
-                                f"车主：{data.get('车主', '')}\n"
-                                f"车型：{data.get('车型', '')}\n"
-                                f"险种：{data.get('险种', '')}\n"
-                                f"保额：{data.get('保额', '')}\n"
-                                f"年保费：{data.get('年保费', '')}\n"
-                                f"到期日：{data.get('到期日', '')}\n"
-                                f"状态：{data.get('状态', '')}"
-                            )
+                            # 转为可读文本给 LLM（query_policy 返回 data 字段，calculate_premium 返回 message 字段）
+                            if "data" in parsed:
+                                data = parsed["data"]
+                                readable = (
+                                    f"✅ 保单查询成功\n"
+                                    f"保单号：{data.get('保单号', '')}\n"
+                                    f"车主：{data.get('车主', '')}\n"
+                                    f"车型：{data.get('车型', '')}\n"
+                                    f"险种：{data.get('险种', '')}\n"
+                                    f"保额：{data.get('保额', '')}\n"
+                                    f"年保费：{data.get('年保费', '')}\n"
+                                    f"到期日：{data.get('到期日', '')}\n"
+                                    f"状态：{data.get('状态', '')}"
+                                )
+                            else:
+                                readable = parsed.get("message", "")
                             new_responder.append(ToolMessage(
                                 content=readable,
                                 tool_call_id=getattr(msg, 'tool_call_id', ''),
@@ -582,8 +585,20 @@ def _make_tools_node():
                     }, ensure_ascii=False)
                     break
                 if "未检索到相关保险条款" in content:
-                    direct_response = "很抱歉，我在知识库中没有找到与您问题相关的条款信息，建议您转人工咨询。"
-                    break
+                    # 统计历史 + 当前共多少次空检索结果，允许最多 3 次工具调用，多给 LLM 重试机会
+                    empty_count = sum(
+                        1 for m in messages
+                        if isinstance(m, ToolMessage) and "未检索到相关保险条款" in str(m.content)
+                    )
+                    empty_count += sum(
+                        1 for m in result.get("messages", [])
+                        if isinstance(m, ToolMessage) and "未检索到相关保险条款" in str(m.content)
+                    )
+                    if empty_count >= 3:
+                        direct_response = "很抱歉，我在知识库中没有找到与您问题相关的条款信息，建议您转人工咨询。"
+                        break
+                    else:
+                        logger.info("[Tools] RAG 第 %d 次空检索，不短路，给 planner 重试机会", empty_count)
 
         if direct_response:
             result["direct_response"] = direct_response

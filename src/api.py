@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from src.constants import APP_VERSION, SERVICE_NAME, JWT_ALGORITHM, PUBLIC_PATHS
 from src.token_usage import get_today_usage, DAILY_TOKEN_LIMIT
 from src.chat import chat_api
+from src.rag import get_last_rag_pipeline_stats, get_last_rag_query
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -115,4 +116,9 @@ def register_routes(application: FastAPI):
     async def chat(req: ChatRequest):
         """对话接口"""
         result = chat_api(req.session_id, req.message)
+        # 附加 RAG 管线调试信息
+        result["debug"] = {
+            "rag_query": get_last_rag_query(),
+            "rag_pipeline": get_last_rag_pipeline_stats()
+        }
         return result
