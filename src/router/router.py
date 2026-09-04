@@ -37,6 +37,7 @@ class RouterConfig:
     l2_accept_threshold: float = 0.7     # L2 >= 此值直接接受
     l2_review_threshold: float = 0.5     # L2 >= 此值且 < accept → L3
     l3_accept_threshold: float = 0.6     # L3 >= 此值接受
+    l2_margin_threshold: float = 0.4     # top1-top2 < 此值 → 模型摇摆 → 强制 L3（即使 conf 已达 accept）
 
 
 _DEFAULT_CONFIG = RouterConfig()
@@ -53,6 +54,30 @@ def _reset_clarify_state() -> dict:
         "waiting_clarification": False,
         "last_clarify_options": [],
     }
+
+
+def _needs_l3_review(l2_result: L2Result, config: RouterConfig) -> tuple:
+    """
+    判断 L2 结果是否需要 L3 复核。返回 (need_l3: bool, reason: str)。
+    触发条件（OR）：
+      1. 置信度落在复核区间 [review_threshold, accept_threshold)（原有逻辑，对所有意图生效）
+      2. 置信度已达 accept 但 top1-top2 margin < margin_threshold（高分但两意图接近，模型摇摆）
+    注：
+      - conf < review_threshold 的低置信度直接走 L4 澄清，不因 margin 触发 L3。
+      - margin 规则仅对业务 route（sale/service）生效；general 不做减法——
+        闲聊无 sale/service 那种业务歧义，general 只按 conf 三段逻辑走（>0.7 采用 / 0.5~0.7 L3 / <0.5 L4）。
+    """
+    conf = l2_result.confidence
+    if config.l2_review_threshold <= conf < config.l2_accept_threshold:
+        return True, f"conf_in_band({conf:.2f})"
+    # margin 摇摆检测：仅业务 route（sale/service），general 豁免
+    if (conf >= config.l2_accept_threshold
+            and l2_result.intent != INTENT_GENERAL
+            and l2_result.alternatives):
+        margin = conf - l2_result.second_confidence
+        if margin < config.l2_margin_threshold:
+            return True, f"low_margin({margin:.2f}<{config.l2_margin_threshold})"
+    return False, ""
 
 
 def _log_route(result: RouterResult, message: str, l1_result: tuple,
@@ -158,7 +183,9 @@ def route_message(
         logger.info("[Router] 复用 DST L2 结果: intent=%s, confidence=%.2f",
                     l2_result.intent, l2_result.confidence)
     
-        if l2_result.confidence >= config.l2_accept_threshold:
+        need_l3, l3_reason = _needs_l3_review(l2_result, config)
+
+        if l2_result.confidence >= config.l2_accept_threshold and not need_l3:
             result = RouterResult(
                 intent=l2_result.intent,
                 confidence=l2_result.confidence,
@@ -169,7 +196,8 @@ def route_message(
             _log_route(result, message, l1_result, l2_result, clarify_count=router_state.clarify_count)
             return result
     
-        if l2_result.confidence >= config.l2_review_threshold:
+        if need_l3:
+            logger.info("[Router] DST复用触发 L3 复核: %s", l3_reason)
             l3_result = l3_review(message, l2_result, llm_reviewer)
             if l3_result["confidence"] >= config.l3_accept_threshold:
                 result = RouterResult(
@@ -239,9 +267,11 @@ def route_message(
     # ===================== L2：小模型主分类 =====================
     l2_result = l2_classify(message, llm_classifier)
 
-    # ---- L2 阈值决策 ----
-    if l2_result.confidence >= config.l2_accept_threshold:
-        # L2 高置信度 → 直接接受
+    # ---- L2 决策：是否触发 L3 复核 ----
+    need_l3, l3_reason = _needs_l3_review(l2_result, config)
+
+    if l2_result.confidence >= config.l2_accept_threshold and not need_l3:
+        # 高置信度且果断（margin 足够大）→ 直接接受
         result = RouterResult(
             intent=l2_result.intent,
             confidence=l2_result.confidence,
@@ -252,8 +282,9 @@ def route_message(
         _log_route(result, message, l1_result, l2_result, clarify_count=router_state.clarify_count)
         return result
 
-    if l2_result.confidence >= config.l2_review_threshold:
-        # L2 中等置信度 → L3 复核
+    if need_l3:
+        # 触发 L3 复核（中置信度 OR 高分但 top1-top2 摇摆）
+        logger.info("[Router] 触发 L3 复核: %s", l3_reason)
         l3_result = l3_review(message, l2_result, llm_reviewer)
 
         if l3_result["confidence"] >= config.l3_accept_threshold:
@@ -272,7 +303,7 @@ def route_message(
             # L3 不通过 → L4
             pass  # fall through to L4
     else:
-        # L2 低置信度 → 直接 L4
+        # conf < review_threshold 低置信度 → 直接 L4
         pass  # fall through to L4
 
     # ===================== L4：澄清 / 转人工 =====================

@@ -22,9 +22,36 @@ data/*.bin
 data/*.log
 data/usage_cache.json
 
+# 运行日志（端到端调试/分析测试产物，不入库）
+logs/
+
 # 操作系统
 .DS_Store
 Thumbs.db
 
-# 测试产物
-tests/test_result.txt
+# 测试目录
+tests/
+
+# RAG 评估脚本与结果
+eval_*.py
+eval_*.json
+eval_*.txt
+eval_*.md
+full_pipeline_*.jsonl
+full_pipeline_*.txt
+full_pipeline_*.md
+diagnose_*.py
+diagnose_*.txt
+_test*.py
+_test*.json
+_test*.txt
+_debug*.py
+_debug*.txt
+_debug*.json
+_analyze*.py
+_analyze*.txt
+test_search.py
+scripts/
+
+# 临时调试文件
+diagnose_result*.txt

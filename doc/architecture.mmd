@@ -11,9 +11,10 @@ graph TB
     end
 
     subgraph LangGraph StateGraph
-        D["router 节点<br/>src/chains/chains.py<br/>关键词路由 + 构建纯净 responder_input<br/>摘要记忆 + 当前用户消息 + 最近工具结果对"]
+        D["router 节点 · 五层漏斗<br/>src/router/<br/>L0 安全拦截 → DST 逃生承接 →<br/>L1 关键词 → L2 小模型分类 →<br/>L3 大模型复核 → L4 澄清/转人工"]
+        D2["prepare_input 节点<br/>src/chains/chains.py<br/>构建纯净 responder_input<br/>摘要记忆 + 当前用户消息 + 最近工具结果对"]
         E["planner 节点<br/>src/chains/chains.py<br/>非流式 LLM 决策 · bind_tools<br/>强制清空 content 防废话"]
-        F["tools 节点<br/>src/chains/chains.py<br/>ToolNode 执行 · 短路检测<br/>转人工/RAG无结果 → direct_response"]
+        F["tools 节点<br/>src/chains/chains.py<br/>ToolNode 执行 · 短路检测<br/>转人工/RAG连续空结果 → direct_response"]
         G["responder 节点<br/>src/chains/chains.py<br/>流式 LLM 生成最终答案<br/>仅使用 responder_input"]
     end
 
@@ -25,8 +26,8 @@ graph TB
     end
 
     subgraph RAG 检索层
-        L["FAISS 向量召回"]
-        M["BGE-Reranker 本地重排<br/>或 LLM 重排 · 生产环境"]
+        L["FAISS 向量 + BM25 双路召回<br/>BM25 索引含【险种】【section】前缀"]
+        M["RRF 融合 + BGE-Reranker 本地重排<br/>或 DashScope Rerank · 生产环境"]
     end
 
     subgraph 基础设施
@@ -38,7 +39,10 @@ graph TB
     A --> C
     B --> C
     C -->|"state.graph.astream_events"| D
-    D -->|"router → planner"| E
+    D -->|"action=route · 正常路由"| D2
+    D -->|"action=clarify · L4 澄清"| G
+    D -->|"action=handoff · L4 转人工"| END_NODE
+    D2 -->|"prepare_input → planner"| E
     E -->|"有 tool_calls"| F
     E -->|"无 tool_calls"| G
     F -->|"direct_response 非空 · 短路直返"| END_NODE
@@ -52,5 +56,5 @@ graph TB
     L --> M
     E --> N
     G --> N
-    D -.-> O
-    D -.-> P
+    C -.->|"历史摘要 · 进图前 update_state"| P
+    C -.->|"checkpointer · thread_id 隔离"| O

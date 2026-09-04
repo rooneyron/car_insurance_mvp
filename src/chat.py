@@ -227,6 +227,10 @@ def _chat_api_inner(session_id: str, message: str) -> dict:
         elif not reply and result.get("messages"):
             last_msg = result["messages"][-1]
             reply = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
+        # ---- DSML 降级检测（非流式路径）----
+        if "<\uff5c\uff5cDSML\uff5c\uff5c" in reply:
+            logger.warning("[chat_api] 检测到 DSML 工具调用标记，触发降级")
+            reply = "抱歉，暂时无法获取相关条款信息，建议转人工客服咨询。"
         # ------------------------------------------------
 
         transfer_flag = _check_transfer_flag(result, history_count)
@@ -329,6 +333,13 @@ async def _chat_api_stream_inner(session_id: str, message: str):
         route = Route.GENERAL
         tool_status_cleared = False  # 是否已在 responder 首次出字时清除 tool_status
 
+        # DSML 降级检测 buffer
+        _dsml_buffer = ""           # 累积前 N 个字符用于检测
+        _dsml_detected = False      # 是否检测到 DSML 标记
+        _DSML_DETECT_LEN = 25      # 攒够多少字符后检测（<｜｜DSML｜｜tool_calls> 约 20 字符）
+        _DSML_MARKER = "<｜｜DSML｜｜"
+        _DSML_FALLBACK = "抱歉，暂时无法获取相关条款信息，建议转人工客服咨询。"
+
         # 导入工具标签映射
         from src.chains.chains import TOOL_LABELS
 
@@ -361,13 +372,39 @@ async def _chat_api_stream_inner(session_id: str, message: str):
                         continue  # 忽略 planner 的内部输出，绝不传给前端
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and chunk.content and isinstance(chunk.content, str):
+                        # 已触发降级 → 跳过后续输出
+                        if _dsml_detected:
+                            continue
+
+                        # ---- 正常流式输出（立即输出，不打断）----
                         current_text += chunk.content
                         full_text = current_text
-                        # 首次出字时清除 tool_status，前端切换到打字机模式
                         if not tool_status_cleared:
                             yield "", {"tool_status": None}
                             tool_status_cleared = True
                         yield current_text, None
+
+                        # ---- 同步攒 buffer 检测 DSML（不阻塞输出）----
+                        if not _dsml_detected and len(_dsml_buffer) < _DSML_DETECT_LEN:
+                            _dsml_buffer += chunk.content
+                            if len(_dsml_buffer) >= _DSML_DETECT_LEN:
+                                if _DSML_MARKER in _dsml_buffer:
+                                    _dsml_detected = True
+                                    logger.warning("[stream] 检测到 DSML 工具调用标记，触发降级")
+                                    current_text = _DSML_FALLBACK
+                                    full_text = current_text
+                                    yield current_text, None
+
+                # ---- LLM 调用结束 → 捕获 Token 用量 ----
+                elif kind == "on_chat_model_end":
+                    msg = event.get("data", {}).get("output")
+                    if msg and hasattr(msg, "usage_metadata"):
+                        usage = msg.usage_metadata or {}
+                        if usage:
+                            add_tokens(
+                                usage.get("input_tokens", 0),
+                                usage.get("output_tokens", 0)
+                            )
 
                 # ---- 捕获路由结果 ----
                 elif kind == "on_chain_end":

@@ -81,13 +81,36 @@ def classify(message: str, llm) -> L2Result:
         # 校验 confidence 范围
         confidence = max(0.0, min(1.0, confidence))
 
+        # 解析 alternatives（top2 备选），过滤非法值及与 top1 重复项
+        alternatives = []
+        raw_alts = parsed.get("alternatives", [])
+        if isinstance(raw_alts, list):
+            for alt in raw_alts:
+                if not isinstance(alt, dict):
+                    continue
+                alt_intent = alt.get("intent", "")
+                if alt_intent not in INTENT_VALUES or alt_intent == intent:
+                    continue
+                try:
+                    alt_conf = max(0.0, min(1.0, float(alt.get("confidence", 0.0))))
+                except (ValueError, TypeError):
+                    alt_conf = 0.0
+                alternatives.append({"intent": alt_intent, "confidence": alt_conf})
+
         result = L2Result(
             intent=intent,
             confidence=confidence,
             sentiment=sentiment,
+            alternatives=alternatives,
         )
-        logger.info("[L2] intent=%s confidence=%.2f sentiment=%s",
-                     intent, confidence, sentiment)
+        if alternatives:
+            logger.info("[L2] intent=%s confidence=%.2f sentiment=%s | top2=%s %.2f margin=%.2f",
+                         intent, confidence, sentiment,
+                         alternatives[0]["intent"], alternatives[0]["confidence"],
+                         confidence - alternatives[0]["confidence"])
+        else:
+            logger.info("[L2] intent=%s confidence=%.2f sentiment=%s",
+                         intent, confidence, sentiment)
         return result
 
     except Exception as e:

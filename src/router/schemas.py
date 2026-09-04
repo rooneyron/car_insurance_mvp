@@ -35,6 +35,32 @@ class L2Result:
     intent: str
     confidence: float
     sentiment: str
+    # top2 备选（新 prompt 输出 alternatives）：[{"intent": str, "confidence": float}]
+    alternatives: List[dict] = field(default_factory=list)
+
+    @property
+    def second_intent(self) -> str:
+        """第二候选意图，无则空串"""
+        if self.alternatives:
+            return str(self.alternatives[0].get("intent", ""))
+        return ""
+
+    @property
+    def second_confidence(self) -> float:
+        """第二候选置信度，无则 0.0"""
+        if self.alternatives:
+            try:
+                return float(self.alternatives[0].get("confidence", 0.0))
+            except (ValueError, TypeError):
+                return 0.0
+        return 0.0
+
+    @property
+    def margin(self) -> float:
+        """top1-top2 置信度差；无第二候选时视为果断，返回 confidence 本身"""
+        if not self.alternatives:
+            return self.confidence
+        return self.confidence - self.second_confidence
 
 
 @dataclass
