@@ -16,7 +16,7 @@ from src.router.l3_reviewer import review as l3_review
 from src.router.l4_fallback import generate_clarify_options, build_clarify_message, should_handoff
 from src.router.dst import dst_escape_check, check_cancel_phrase
 from src.constants import (
-    INTENT_GENERAL, INTENT_HANDOFF, INTENT_CLARIFY,
+    INTENT_GENERAL, INTENT_SALE, INTENT_SERVICE, INTENT_HANDOFF, INTENT_CLARIFY,
     ACTION_ROUTE, ACTION_CLARIFY, ACTION_HANDOFF,
     SOURCE_L0_SAFETY, SOURCE_DST, SOURCE_L1_KEYWORD, SOURCE_L2, SOURCE_L2_DST_ESCAPE, SOURCE_L3,
     SOURCE_L4_CLARIFY, SOURCE_L4_HANDOFF,
@@ -37,7 +37,6 @@ class RouterConfig:
     l2_accept_threshold: float = 0.7     # L2 >= 此值直接接受
     l2_review_threshold: float = 0.5     # L2 >= 此值且 < accept → L3
     l3_accept_threshold: float = 0.6     # L3 >= 此值接受
-    l2_margin_threshold: float = 0.4     # top1-top2 < 此值 → 模型摇摆 → 强制 L3（即使 conf 已达 accept）
 
 
 _DEFAULT_CONFIG = RouterConfig()
@@ -60,23 +59,20 @@ def _needs_l3_review(l2_result: L2Result, config: RouterConfig) -> tuple:
     """
     判断 L2 结果是否需要 L3 复核。返回 (need_l3: bool, reason: str)。
     触发条件（OR）：
-      1. 置信度落在复核区间 [review_threshold, accept_threshold)（原有逻辑，对所有意图生效）
-      2. 置信度已达 accept 但 top1-top2 margin < margin_threshold（高分但两意图接近，模型摇摆）
+      1. 置信度落在复核区间 [review_threshold, accept_threshold)（中置信度，对所有意图生效）
+      2. 置信度已达 accept，但 top1/top2 恰好构成 {sale, service} 对
+         （高分但在售前/售后边界犹豫，交大模型独立复核）
     注：
-      - conf < review_threshold 的低置信度直接走 L4 澄清，不因 margin 触发 L3。
-      - margin 规则仅对业务 route（sale/service）生效；general 不做减法——
-        闲聊无 sale/service 那种业务歧义，general 只按 conf 三段逻辑走（>0.7 采用 / 0.5~0.7 L3 / <0.5 L4）。
+      - conf < review_threshold 的低置信度直接走 L4 澄清，不因 alternatives 触发 L3。
+      - 边界犹豫规则只认 sale↔service 这一对；top2 为 general 或无 alternatives 时不触发。
     """
     conf = l2_result.confidence
     if config.l2_review_threshold <= conf < config.l2_accept_threshold:
         return True, f"conf_in_band({conf:.2f})"
-    # margin 摇摆检测：仅业务 route（sale/service），general 豁免
-    if (conf >= config.l2_accept_threshold
-            and l2_result.intent != INTENT_GENERAL
-            and l2_result.alternatives):
-        margin = conf - l2_result.second_confidence
-        if margin < config.l2_margin_threshold:
-            return True, f"low_margin({margin:.2f}<{config.l2_margin_threshold})"
+    # 高置信度但 sale↔service 边界犹豫 → L3（集合比较，覆盖 sale→service / service→sale 双向）
+    if conf >= config.l2_accept_threshold and l2_result.alternatives:
+        if {l2_result.intent, l2_result.second_intent} == {INTENT_SALE, INTENT_SERVICE}:
+            return True, f"sale_service_boundary(top2={l2_result.second_intent})"
     return False, ""
 
 
@@ -271,7 +267,7 @@ def route_message(
     need_l3, l3_reason = _needs_l3_review(l2_result, config)
 
     if l2_result.confidence >= config.l2_accept_threshold and not need_l3:
-        # 高置信度且果断（margin 足够大）→ 直接接受
+        # 高置信度且非 sale↔service 边界犹豫 → 直接接受
         result = RouterResult(
             intent=l2_result.intent,
             confidence=l2_result.confidence,
@@ -283,7 +279,7 @@ def route_message(
         return result
 
     if need_l3:
-        # 触发 L3 复核（中置信度 OR 高分但 top1-top2 摇摆）
+        # 触发 L3 复核（中置信度 OR 高分但 sale↔service 边界犹豫）
         logger.info("[Router] 触发 L3 复核: %s", l3_reason)
         l3_result = l3_review(message, l2_result, llm_reviewer)
 

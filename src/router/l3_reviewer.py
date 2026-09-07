@@ -80,7 +80,8 @@ def review(message: str, l2_result: L2Result, llm) -> dict:
         return result
 
     except Exception as e:
-        logger.error("[L3] LLM 调用失败: %s", e)
+        # 打印完整异常链（含底层连接错误），再沿用 L2 兜底（路由层容错，不中断请求）
+        logger.exception("[L3] LLM 调用失败")
         return {
             "intent": l2_result.intent,
             "confidence": l2_result.confidence,

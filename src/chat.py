@@ -307,6 +307,7 @@ async def _chat_api_stream_inner(session_id: str, message: str):
 
     timer = Timer()
     timer.start("总耗时")
+    _t_input = time.time()  # 用户输入到达时刻（端到端首字计时基准）
     logger.debug("[stream] 收到消息: %s...", message[:30])
 
     timing_handler = create_timing_handler()
@@ -328,10 +329,12 @@ async def _chat_api_stream_inner(session_id: str, message: str):
             pass
 
         full_text = ""
-        current_text = ""
+        current_text = ""          # 最终 yield 的文本（正常路径=最后一轮 answer；短路=direct_response）
+        round_index = 0            # 当前 planner 轮次（每次 on_tool_start 后 +1）
+        round_text = ""            # 当前轮 content 累积（每轮重置，不再跨轮拼接成一段）
         transfer_detected = False
         route = Route.GENERAL
-        tool_status_cleared = False  # 是否已在 responder 首次出字时清除 tool_status
+        first_char_ms = None  # 端到端首字耗时：用户输入 → 前端首个流式 chunk 推送时刻
 
         # DSML 降级检测 buffer
         _dsml_buffer = ""           # 累积前 N 个字符用于检测
@@ -352,37 +355,42 @@ async def _chat_api_stream_inner(session_id: str, message: str):
                 kind = event.get("event", "")
                 node_name = event.get("metadata", {}).get("langgraph_node", "")
 
-                # ---- 工具开始 → 推送"正在调用..."状态 ----
+                # ---- 工具开始 → 当前 planner 轮的 content 定性为"思考"，随后进入下一轮 ----
                 if kind == "on_tool_start":
                     tool_name = event.get("name", "")
                     label = TOOL_LABELS.get(tool_name, tool_name)
-                    yield "", {"tool_status": f"正在调用 {label}..."}
+                    yield "", {"tool_status": f"正在调用 {label}...", "planner_round": round_index, "role": "thinking"}
                     if tool_name == TOOL_TRANSFER_NAME:
                         transfer_detected = True
+                    round_index += 1
+                    round_text = ""
+                    _dsml_buffer = ""   # 新一轮重置 DSML 检测 buffer
 
                 # ---- 工具结束 → 推送"调用完成"状态 ----
                 elif kind == "on_tool_end":
                     tool_name = event.get("name", "")
                     label = TOOL_LABELS.get(tool_name, tool_name)
-                    yield "", {"tool_status": f"{label} 调用完成"}
+                    yield "", {"tool_status": f"{label} 调用完成", "planner_round": round_index - 1, "role": "tool"}
 
-                # ---- LLM 流式输出（仅 responder 节点）----
+                # ---- LLM 流式输出（仅 planner 节点：responder 已删除，planner 直接对前端）----
                 elif kind == "on_chat_model_stream":
-                    if node_name != "responder":
-                        continue  # 忽略 planner 的内部输出，绝不传给前端
+                    if node_name != "planner":
+                        continue  # 忽略 router(分类器/评审) 等非 planner 节点的模型输出
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and chunk.content and isinstance(chunk.content, str):
                         # 已触发降级 → 跳过后续输出
                         if _dsml_detected:
                             continue
 
-                        # ---- 正常流式输出（立即输出，不打断）----
-                        current_text += chunk.content
+                        # ---- 记录端到端首字：第一个可见字符推给前端的时刻 ----
+                        if first_char_ms is None:
+                            first_char_ms = (time.time() - _t_input) * 1000
+
+                        # ---- 正常流式输出（按轮累积，带 round/role 元信息，供前端分轮渲染思考）----
+                        round_text += chunk.content
+                        current_text = round_text
                         full_text = current_text
-                        if not tool_status_cleared:
-                            yield "", {"tool_status": None}
-                            tool_status_cleared = True
-                        yield current_text, None
+                        yield round_text, {"planner_round": round_index, "role": "streaming"}
 
                         # ---- 同步攒 buffer 检测 DSML（不阻塞输出）----
                         if not _dsml_detected and len(_dsml_buffer) < _DSML_DETECT_LEN:
@@ -391,9 +399,10 @@ async def _chat_api_stream_inner(session_id: str, message: str):
                                 if _DSML_MARKER in _dsml_buffer:
                                     _dsml_detected = True
                                     logger.warning("[stream] 检测到 DSML 工具调用标记，触发降级")
-                                    current_text = _DSML_FALLBACK
+                                    round_text = _DSML_FALLBACK
+                                    current_text = round_text
                                     full_text = current_text
-                                    yield current_text, None
+                                    yield round_text, {"planner_round": round_index, "role": "streaming"}
 
                 # ---- LLM 调用结束 → 捕获 Token 用量 ----
                 elif kind == "on_chat_model_end":
@@ -427,6 +436,9 @@ async def _chat_api_stream_inner(session_id: str, message: str):
 
         timer.stop("总耗时")
         elapsed_ms = timer.get_total_ms()
+        # 端到端首字兜底：短路直返/无流式逐字输出时，首字即最终响应时刻
+        if first_char_ms is None:
+            first_char_ms = elapsed_ms
 
         # ---------- 后处理 ----------
         transfer = False
@@ -465,6 +477,7 @@ async def _chat_api_stream_inner(session_id: str, message: str):
         detail_records = timing_handler.drain_records()
         report_lines = [f"  \u251c\u2500\u2500 {r['label']}: {r['ms']:.0f}ms" for r in detail_records]
         report_lines.append(timer.get_report())
+        report_lines.append(f"  ├── 端到端首字（用户输入→前端首字）: {first_char_ms:.0f}ms")
         logger.info("[stream] 性能日志 - 总耗时: %.0fms\n%s", elapsed_ms, "\n".join(report_lines))
 
         metadata = {
@@ -473,6 +486,8 @@ async def _chat_api_stream_inner(session_id: str, message: str):
             "elapsed_ms": elapsed_ms,
             "router_source": router_source,
             "router_confidence": router_confidence,
+            "planner_round": round_index,
+            "role": "answer",
         }
         yield current_text, metadata
 

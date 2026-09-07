@@ -119,20 +119,48 @@ def create_gradio_interface():
 
             assistant_idx = len(chat_history) - 1
             last_metadata = None
+            lines = []              # 已定型展示行：[("thinking"/"tool"/"answer", text)]，多轮思考全部保留
+            cur_stream = ""         # 当前 planner 轮正在流式的文本（角色待定）
             
             async for partial_text, metadata in chat_api_stream(session_id, message):
                 if metadata and metadata.get("error"):
                     chat_history[assistant_idx]["content"] = f"❌ {partial_text}"
                     yield "", chat_history, session_id, gr.update(interactive=True), gr.update(interactive=True)
                     return
+                role = metadata.get("role") if metadata else None
+                tool_status = metadata.get("tool_status") if metadata else None
                 if metadata:
                     last_metadata = metadata
-                    tool_status = metadata.get("tool_status")
+
+                if role == "streaming":
+                    # 当前轮 content 流式累积（partial_text 即该轮文本）
+                    cur_stream = partial_text or ""
+                elif role == "thinking":
+                    # on_tool_start：当前轮定性为思考 → 定型为 💭 行，再追加工具状态行
+                    if cur_stream:
+                        lines.append(("thinking", cur_stream))
+                        cur_stream = ""
                     if tool_status:
-                        # 显示工具调用状态（如"正在调用 保费计算器..."）
-                        chat_history[assistant_idx]["content"] = tool_status
-                if partial_text:
-                    chat_history[assistant_idx]["content"] = partial_text
+                        lines.append(("tool", "🔧 " + tool_status))
+                elif role == "tool":
+                    # on_tool_end：把最近的工具状态行更新为"调用完成"
+                    if tool_status:
+                        if lines and lines[-1][0] == "tool":
+                            lines[-1] = ("tool", "🔧 " + tool_status)
+                        else:
+                            lines.append(("tool", "🔧 " + tool_status))
+                elif role == "answer":
+                    # 收尾：最后一轮定性为最终答案
+                    final = partial_text or cur_stream
+                    if final:
+                        lines.append(("answer", final))
+                    cur_stream = ""
+
+                # 渲染：已定型行（思考加 💭）+ 进行中的当前轮
+                parts = [("💭 " + text) if typ == "thinking" else text for typ, text in lines]
+                if cur_stream:
+                    parts.append(cur_stream)
+                chat_history[assistant_idx]["content"] = "\n\n".join(parts) if parts else "正在思考..."
                 yield "", chat_history, session_id, gr.update(interactive=False), gr.update(interactive=False)
 
             # 流结束后前置路由标签

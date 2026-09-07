@@ -177,7 +177,7 @@ def transfer_to_human_logic(reason: str) -> str:
 
 @tool
 def calculate_premium(car_model: Optional[str] = None, driver_age: Optional[int] = None, years_driving: Optional[int] = None) -> str:
-    """估算车险保费。在用户询问保费、报价、投保费用时调用。参数：car_model（车型）、driver_age（驾驶员年龄）、years_driving（驾龄）。即使参数不全也请调用，工具会返回缺少哪些参数。"""
+    """估算车险保费。在用户询问保费、报价、投保费用时调用。参数：car_model（车型）、driver_age（驾驶员年龄）、years_driving（驾龄）。"""
     result = calculate_premium_logic(car_model, driver_age, years_driving)
     # 工具返回结构化 dict，由 tools_node 解析处理
     return json.dumps(result, ensure_ascii=False)
@@ -185,7 +185,7 @@ def calculate_premium(car_model: Optional[str] = None, driver_age: Optional[int]
 
 @tool
 def query_policy(policy_id: Optional[str] = None, id_card: Optional[str] = None) -> str:
-    """查询保单详情。当用户询问保单信息、保单状态时调用。参数：policy_id（保单号）、id_card（身份证号）。即使参数不全也请调用，工具会返回缺少哪些参数。"""
+    """查询保单详情。当用户询问保单信息、保单状态时调用。参数：policy_id（保单号）、id_card（身份证号）。"""
     result = query_policy_logic(policy_id, id_card)
     # 工具返回结构化 dict，由 tools_node 解析处理
     return json.dumps(result, ensure_ascii=False)
@@ -234,8 +234,8 @@ class GraphState(TypedDict):
     """编排图的状态定义"""
     messages: Annotated[list, add_messages]
     agent_type: str          # 当前 Agent 类型：general / sale / service
-    responder_input: list    # 纯净输入（prepare_input 节点构建，供 planner + responder 使用）
-    direct_response: Optional[str]  # 短路直返内容：非空时跳过 planner → responder，直接返回给前端
+    responder_input: list    # 【已废弃】原供 responder 使用的纯净输入；responder 删除后暂无消费方，待后续清理
+    direct_response: Optional[str]  # 短路直返内容：非空时前端从 final_state 直接取用（clarify/handoff/工具短路），不经 LLM 生成
     route: str
     reply: str
     summary: Optional[str]   # 长期记忆摘要（由 SummarizationNode 生成）
@@ -422,8 +422,15 @@ def _make_router_node(llm_classifier, llm_reviewer):
 
 
 def _make_planner_node(llm):
-    """决策节点：非流式调用 LLM，决定是否调用工具。"""
-    def planner_node(state: GraphState, config: RunnableConfig) -> dict:
+    """决策 + 回复节点：流式调用 LLM 决定是否调用工具；不调工具时其 content 即最终回复。
+
+    responder 已删除，planner 直接对前端负责：调工具轮 content 为空、累积重建 tool_calls 供路由；
+    直接回复轮 content 即成品回复，流式推给前端并写入 reply 字段（供非流式 chat_api 取用）。
+    观察日志由环境变量 PLANNER_STREAM_DEBUG 控制（默认 1=开；观察完设 0 静默）。
+    """
+    _stream_debug = os.environ.get("PLANNER_STREAM_DEBUG", "1") == "1"
+
+    async def planner_node(state: GraphState, config: RunnableConfig) -> dict:
         agent_type = state.get("agent_type", Route.GENERAL.value)
         system_prompt = AGENT_SYSTEM_PROMPTS.get(agent_type, AGENT_SYSTEM_PROMPTS[INTENT_GENERAL])
         tools = AGENT_TOOLS.get(agent_type, [])
@@ -433,10 +440,23 @@ def _make_planner_node(llm):
 
         full_messages = [SystemMessage(content=system_prompt)] + messages
 
-        if tools:
-            result = llm.bind_tools(tools).invoke(full_messages)
-        else:
-            result = llm.invoke(full_messages)
+        # 本轮轮次：输入已含 ToolMessage = 拿过工具结果的「第2轮/直接回复轮」，否则「第1轮/调工具轮」
+        is_first_round = not any(isinstance(m, ToolMessage) for m in messages)
+        round_label = "第1轮/调工具轮" if is_first_round else "第2轮/直接回复轮"
+
+        try:
+            llm_runner = llm.bind_tools(tools) if tools else llm
+            result = None
+            chunk_count = 0
+            async for chunk in llm_runner.astream(full_messages):
+                chunk_count += 1
+                result = chunk if result is None else result + chunk
+            if result is None:
+                result = AIMessage(content="")  # 极端兜底：流未产生任何 chunk，避免后续 NoneType 崩溃
+        except Exception:
+            # 打印完整异常链（含底层连接错误，如 RemoteProtocolError），用于诊断偶发请求失败；不吞异常
+            logger.exception("[Planner] LLM 调用失败 (agent=%s)", agent_type)
+            raise
 
         # 日志：planner 返回内容
         tool_calls = getattr(result, 'tool_calls', None) or []
@@ -447,9 +467,28 @@ def _make_planner_node(llm):
             content_preview = (result.content or '')[:80]
             logger.info("[Planner] 不调工具, 直接回复 (agent=%s, content='%s')", agent_type, content_preview)
 
-        result.content = ""  # 强制清空 content，防止废话污染历史
+        # 【诊断】记录本轮完整流式输出：调工具轮 content 应为空；直接回复轮 content 即推送前端的成品回复
+        if _stream_debug:
+            final_content = result.content if isinstance(result.content, str) else str(result.content)
+            if tool_calls:
+                logger.info(
+                    "[Planner-Stream][%s] ⚙️ 决定调工具 %s | 累积content=%r | chunk数=%d（观察点：调工具时 content 是否为空）",
+                    round_label, [tc.get('name') for tc in tool_calls], final_content, chunk_count,
+                )
+            else:
+                logger.info(
+                    "[Planner-Stream][%s] 💬 直接回复 | chunk数=%d | 推送前端的完整content:\n%s",
+                    round_label, chunk_count, final_content or "(空)",
+                )
 
-        return {"messages": [result]}
+        # 调工具轮：清空 content（防前导废话污染历史），保留 tool_calls 供路由；
+        # 直接回复轮：content 即最终答案，保留并写入 reply（responder 已删，planner 直接对前端 + 供非流式 chat_api 取用）
+        if tool_calls:
+            result.content = ""
+            return {"messages": [result]}
+
+        final_reply = result.content if isinstance(result.content, str) else str(result.content)
+        return {"messages": [result], "reply": final_reply}
 
     return planner_node
 
@@ -608,38 +647,9 @@ def _make_tools_node():
     return _tools_node
 
 
-def _make_responder_node(llm):
-    async def responder_node(state: GraphState, config: RunnableConfig) -> dict:
-        # 短路：direct_response 已设置（clarify/handoff），跳过 LLM
-        direct_response = state.get("direct_response")
-        if direct_response:
-            return {
-                "messages": [AIMessage(content=direct_response)],
-                "reply": direct_response,
-            }
-
-        agent_type = state.get("agent_type", Route.GENERAL.value)
-        system_prompt = AGENT_SYSTEM_PROMPTS.get(agent_type, AGENT_SYSTEM_PROMPTS[INTENT_GENERAL])
-        responder_input = list(state.get("responder_input", []))
-
-        full_messages = [SystemMessage(content=system_prompt)] + responder_input
-
-        full_content = ""
-        async for chunk in llm.astream(full_messages):
-            if chunk.content:
-                full_content += chunk.content
-
-        return {
-            "messages": [AIMessage(content=full_content)],
-            "reply": full_content,
-        }
-
-    return responder_node
-
-
 def _make_prepare_input_node():
     """输入准备节点：从 messages + summary 构建纯净的 responder_input。
-    位于 router 和 planner 之间，确保 planner 和 responder 都使用准备好的数据。
+    位于 router 和 planner 之间。【注意】responder 已删除，responder_input 当前无消费方，本节点暂为惰性保留，待后续清理。
     """
     def prepare_input_node(state: GraphState) -> dict:
         messages = state.get("messages", [])
@@ -651,27 +661,29 @@ def _make_prepare_input_node():
 
 
 def _router_condition(state: GraphState) -> str:
-    """Router 节点后的条件边：根据 action 决定下一步"""
+    """Router 节点后的条件边：根据 action 决定下一步。
+    clarify/handoff 均已由 router 写入 direct_response，前端从 final_state 兜底取用，直接 END（responder 已删除）。
+    """
     action = state.get("action", ACTION_ROUTE)
     if action == ACTION_HANDOFF:
         return "end"
     if action == ACTION_CLARIFY:
-        return "responder"
+        return "end"
     return "prepare_input"
 
 
 def _planner_condition(state: GraphState) -> str:
-    """条件边：planner → tools（有 tool_calls） 或 responder（无 tool_calls）"""
+    """条件边：planner → tools（有 tool_calls） 或 END（无 tool_calls，planner 已直接产出回复）"""
     messages = state.get("messages", [])
     if not messages:
-        return "responder"
+        return "end"
     last_msg = messages[-1]
     if hasattr(last_msg, 'tool_calls') and last_msg.tool_calls:
         tool_names = [tc.get('name', '?') for tc in last_msg.tool_calls]
         logger.info("[Planner→Tools] 路由到工具节点: %s", tool_names)
         return "tools"
-    logger.info("[Planner→Responder] 路由到回复节点（无工具调用）")
-    return "responder"
+    logger.info("[Planner→END] 无工具调用，planner 直接回复并结束")
+    return "end"
 
 
 def _after_tools_condition(state: GraphState) -> str:
@@ -700,13 +712,87 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         model_name = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
     import httpx
+
+    # ---------- 真正生效的超时：必须设在 ChatOpenAI(request_timeout=...)，而非 http_client ----------
+    # 实测：openai SDK 发请求时恒传 timeout=self.timeout（逐请求覆盖 http_client 的 timeout），
+    #       故在 http_client 上写 timeout=... 是死配置。真正超时用 ChatOpenAI(request_timeout=...)。
+    # 用 httpx.Timeout 做细粒度超时（已验证 langchain_openai 1.3.3 原样透传到底层 httpx，connect 生效）：
+    #   connect —— TCP+TLS 握手上限。默认 3s：正常握手 <1s，3s 留足余量；异常时 3s 快速失败重试，
+    #             不再干等远程 RST（实测 dashscope qwen-turbo 曾卡 22s 才 ConnectionReset 10054）。
+    #             环境变量 LLM_CONNECT_TIMEOUT 可调（更激进设 1，更保守设 5）；设 0/空 = connect 不设限。
+    #   read    —— 等响应数据上限。默认 60s：不误杀正常慢生成（实测单次 planner 可达 23s）。
+    #             环境变量 LLM_REQUEST_TIMEOUT 可调；设为 0 或空 = 完全不设超时（回到无限等待的旧决策）。
+    #   write / pool —— 发送请求 / 从连接池取连接，各 10s / 5s。
+    _req_timeout_env = os.environ.get("LLM_REQUEST_TIMEOUT", "60").strip()
+    _conn_timeout_env = os.environ.get("LLM_CONNECT_TIMEOUT", "3").strip()
+    try:
+        _read_timeout = float(_req_timeout_env) if _req_timeout_env not in ("", "0") else None
+    except ValueError:
+        logger.warning("LLM_REQUEST_TIMEOUT=%r 非法，回退为 read=60", _req_timeout_env)
+        _read_timeout = 60.0
+    try:
+        _connect_timeout = float(_conn_timeout_env) if _conn_timeout_env not in ("", "0") else None
+    except ValueError:
+        logger.warning("LLM_CONNECT_TIMEOUT=%r 非法，回退为 connect=3", _conn_timeout_env)
+        _connect_timeout = 3.0
+
+    if _read_timeout is None:
+        llm_request_timeout = None  # 显式关闭超时（旧决策：LLM_REQUEST_TIMEOUT=0/空 → 无限等待）
+    else:
+        llm_request_timeout = httpx.Timeout(
+            connect=_connect_timeout, read=_read_timeout, write=10.0, pool=5.0,
+        )
+    logger.info(
+        "LLM 超时配置: %s",
+        "无（无限等待）" if llm_request_timeout is None
+        else f"connect={llm_request_timeout.connect}s read={llm_request_timeout.read}s write=10s pool=5s",
+    )
+
+    # ---------- 重试次数：环境变量 LLM_MAX_RETRIES 控制（默认 2）----------
+    # 诊断时设 0：第一次请求失败直接抛错、暴露底层真凶（连接断连/超时/5xx），不被自动重试掩盖；
+    # 演示/生产默认 2（同 openai SDK 默认）：偶发断连或 5xx 自动重试救回；connect=3 快速失败下多一次重试仅多 ~3s。
+    _max_retries_env = os.environ.get("LLM_MAX_RETRIES", "2").strip()
+    try:
+        llm_max_retries = int(_max_retries_env)
+    except ValueError:
+        logger.warning("LLM_MAX_RETRIES=%r 非法，回退为默认 2", _max_retries_env)
+        llm_max_retries = 2
+
+    # ---------- HTTP 层诊断日志：让每次真实 POST 的耗时可见，用于区分"生成慢" vs "超时重试" ----------
+    #   单次慢   → 仅一行 [HTTP-DIAG] ← 200 ... 23000ms，且上方无 openai 'Retrying request'
+    #   超时重试 → 出现 openai 'Retrying request to /chat/completions'，且 [HTTP-DIAG] → POST 出现两次
+    # 环境变量 LLM_HTTP_DIAG=1 开启（默认 0=关闭）；LLM_SLOW_HTTP_MS 调慢请求告警阈值（默认 8000ms）。
+    # 注意：钩子挂在 sync http_client 上，只覆盖走同步 invoke 的 classifier、reviewer；
+    #       planner 走 astream（openai 异步 AsyncClient 是独立连接池），不经过这里，故不打 [HTTP-DIAG]。
+    _http_diag = os.environ.get("LLM_HTTP_DIAG", "0") == "1"
+    try:
+        _slow_http_ms = float(os.environ.get("LLM_SLOW_HTTP_MS", "8000"))
+    except ValueError:
+        _slow_http_ms = 8000.0
+
+    def _diag_on_request(request):
+        request.extensions["_diag_t0"] = time.time()
+        logger.info("[HTTP-DIAG] → POST %s", request.url.path)
+
+    def _diag_on_response(response):
+        t0 = response.request.extensions.get("_diag_t0")
+        elapsed = (time.time() - t0) * 1000 if t0 else -1.0
+        if elapsed > _slow_http_ms:
+            logger.warning(
+                "[HTTP-DIAG] ← %s %s 单次POST %.0fms ⚠️偏慢（若上方无 openai 'Retrying request' 即为生成慢，非重试）",
+                response.status_code, response.request.url.path, elapsed,
+            )
+        else:
+            logger.info("[HTTP-DIAG] ← %s %s %.0fms", response.status_code, response.request.url.path, elapsed)
+
     http_client = httpx.Client(
         limits=httpx.Limits(
             max_connections=10,
             max_keepalive_connections=5,
             keepalive_expiry=300,
         ),
-        timeout=httpx.Timeout(10.0, connect=5.0),
+        event_hooks={"request": [_diag_on_request], "response": [_diag_on_response]} if _http_diag else None,
+        # 不再设 timeout=：在 http_client 上设超时是死配置（见上），真正超时用 ChatOpenAI(request_timeout=...)
     )
 
     llm = ChatOpenAI(
@@ -714,7 +800,8 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         api_key=api_key,
         base_url="https://api.deepseek.com/v1",
         temperature=0,
-        max_retries=1,
+        max_retries=llm_max_retries,
+        request_timeout=llm_request_timeout,
         http_client=http_client,
     )
 
@@ -752,7 +839,8 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         api_key=classifier_api_key,
         base_url=classifier_base_url,
         temperature=0.1,
-        max_retries=1,
+        max_retries=llm_max_retries,
+        request_timeout=llm_request_timeout,
         http_client=http_client,
     )
     llm_reviewer = ChatOpenAI(
@@ -760,18 +848,18 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         api_key=api_key,
         base_url="https://api.deepseek.com/v1",
         temperature=0,
-        max_retries=1,
+        max_retries=llm_max_retries,
+        request_timeout=llm_request_timeout,
         http_client=http_client,
     )
 
     logger.info("Router LLM: classifier=%s@%s, reviewer=%s@deepseek", classifier_model, classifier_base_url, reviewer_model)
 
-    # ---------- 创建 5 个节点 ----------
+    # ---------- 创建 4 个节点（responder 已删除，planner 直接产出回复并对前端）----------
     router_node = _make_router_node(llm_classifier, llm_reviewer)
     prepare_input_node = _make_prepare_input_node()
     planner_node = _make_planner_node(llm)
     tools_node = _make_tools_node()
-    responder_node = _make_responder_node(llm)
 
     # ---------- 构建图 ----------
     logger.info("构建手写 StateGraph 编排图...")
@@ -781,7 +869,6 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
     builder.add_node("prepare_input", prepare_input_node)
     builder.add_node("planner", planner_node)
     builder.add_node("tools", tools_node)
-    builder.add_node("responder", responder_node)
 
     builder.add_edge(START, "router")
     builder.add_conditional_edges(
@@ -789,7 +876,6 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         _router_condition,
         {
             "prepare_input": "prepare_input",
-            "responder": "responder",
             "end": END,
         }
     )
@@ -801,7 +887,7 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         _planner_condition,
         {
             "tools": "tools",
-            "responder": "responder",
+            "end": END,
         }
     )
 
@@ -814,26 +900,37 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         }
     )
 
-    builder.add_edge("responder", END)
-
     graph = builder.compile(checkpointer=memory)
 
     logger.info("✅ StateGraph 编排图构建完成")
-    logger.info("📊 图结构: START → router(L0-L4) → prepare_input → planner ⇄ tools → responder → END")
+    logger.info("📊 图结构: START → router(L0-L4) → prepare_input → planner ⇄ tools → END")
 
-    return graph, llm
+    return graph, llm, llm_classifier
 
 
-def warmup_llm(llm: ChatOpenAI):
+def warmup_llm(*llms: ChatOpenAI):
     """
-    预热 LLM 连接：发送一个极轻量请求，提前建立 TCP/TLS 连接。
+    预热 LLM 连接：对每个传入的 client 各发一个 invoke("hi") 极轻量请求，提前建立 TCP/TLS 连接。
+
+    逐个独立预热（某个失败不影响其余）。用同步 invoke 预热的是同步连接池，覆盖走 invoke 的
+    classifier(dashscope)、reviewer(deepseek)。⚠ planner 走 astream（openai 异步 AsyncClient 是
+    独立连接池），此同步预热覆盖不到它的异步池——planner 异步预热待另开任务补齐。
     """
-    try:
-        logger.info("正在预热 LLM 连接...")
-        llm.invoke("hi")
-        logger.info("LLM 连接预热完成")
-    except Exception as e:
-        logger.warning(f"LLM 预热失败（不影响服务）: {e}")
+    for llm in llms:
+        base_url = getattr(llm, "openai_api_base", None) or getattr(llm, "base_url", None) or "unknown"
+        try:
+            logger.info("正在预热 LLM 连接: %s", base_url)
+            llm.invoke("hi")
+            logger.info("LLM 连接预热完成: %s", base_url)
+        except Exception:
+            logger.warning("LLM 预热失败（不影响服务）: %s", base_url, exc_info=True)
+            # 连接失败后主动诊断到该上游的连接质量（DNS/TCP/TLS 分段耗时），判断是否本机网络问题
+            if base_url != "unknown":
+                try:
+                    from src.utils.conn_diag import diagnose_url
+                    diagnose_url(base_url)
+                except Exception:
+                    pass
 
 
 # ============================================================
@@ -846,7 +943,7 @@ if __name__ == "__main__":
     logger.info(">>> 开始测试 StateGraph 初始化...")
 
     try:
-        graph, _ = init_graph()
+        graph, _, _ = init_graph()
 
         logger.info("✅ StateGraph 初始化成功！")
         logger.info("  - Graph 类型: %s", type(graph).__name__)

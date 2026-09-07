@@ -12,6 +12,7 @@ import time
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 import faiss
+import jieba
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from src.constants import RAG_EMPTY_RESULT, RAG_CHUNK_SIZE, RAG_CHUNK_OVERLAP, FAISS_RECALL_TOP_K
 from src.logger import get_logger
@@ -186,6 +187,79 @@ def init_rag():
         logger.info("Rerank 模型加载完成 (path=%s)", model_path)
 
 
+def init_rag_components():
+    """启动时一次性预加载所有 RAG 组件，避免首个请求触发懒加载。
+
+    相比 init_rag()（仅 FAISS + Embedding + CrossEncoder 模型），额外预加载：
+      - jieba 分词器词典（否则首请求 Building prefix dict 约 0.35s）
+      - BM25 索引 + chunk 元数据 + 自定义词典
+      - 同义词词典
+      - CrossEncoder 预热推理（消除首次 predict 的 torch warmup）
+    各组件均有全局守卫，幂等可重复调用。生产模式（USE_LOCAL_RERANK=false）跳过本地 CrossEncoder。
+    """
+    global _index, _chunks, _embedding_model, _reranker
+    t_all = time.time()
+
+    # torch CPU 推理线程数：实测本机 8 线程最优（默认仅 6 偏保守，>8 因超线程争抢反而慢）。
+    # 只改并行度、不改模型/候选/检索逻辑，精排分数完全一致=零质量损失。可用 RERANK_NUM_THREADS 覆盖。
+    import torch
+    try:
+        _n_threads = int(os.environ.get("RERANK_NUM_THREADS", "8"))
+    except ValueError:
+        logger.warning("RERANK_NUM_THREADS=%r 非法，回退为默认 8", os.environ.get("RERANK_NUM_THREADS"))
+        _n_threads = 8
+    torch.set_num_threads(_n_threads)
+    logger.info("[RAG-启动] torch推理线程数设为: %d（实测8最优）", _n_threads)
+
+    # ① jieba 分词器（预热词典，避免首请求 Building prefix dict）
+    t = time.time()
+    jieba.initialize()
+    logger.info("[RAG-启动] jieba加载: %.3fs", time.time() - t)
+
+    # ② FAISS 索引 + chunks
+    t = time.time()
+    _index, _chunks = build_or_load_index()
+    logger.info("[RAG-启动] FAISS索引加载: %.3fs | %d条chunk", time.time() - t, len(_chunks))
+
+    # ③ Embedding 模型
+    t = time.time()
+    if _embedding_model is None:
+        from fastembed import TextEmbedding
+        _embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL)
+    logger.info("[RAG-启动] Embedding模型加载: %.3fs", time.time() - t)
+
+    # ④ CrossEncoder 精排模型（仅本地精排模式）
+    use_local_rerank = os.environ.get("USE_LOCAL_RERANK", "true").lower() == "true"
+    if use_local_rerank:
+        t = time.time()
+        if _reranker is None:
+            from sentence_transformers import CrossEncoder
+            model_path = _resolve_hf_cached_path(RERANK_MODEL) or RERANK_MODEL
+            _reranker = CrossEncoder(model_path, max_length=512, local_files_only=True)
+        logger.info("[RAG-启动] CrossEncoder模型加载: %.3fs", time.time() - t)
+    else:
+        logger.info("[RAG-启动] 生产模式：跳过本地 CrossEncoder（精排走 qwen3-rerank API）")
+
+    # ⑤ BM25 索引（含 chunk 元数据 + 自定义词典）
+    t = time.time()
+    _init_bm25()
+    logger.info("[RAG-启动] BM25索引构建: %.3fs | %d条文档", time.time() - t, len(_bm25_corpus))
+
+    # ⑥ 同义词词典
+    t = time.time()
+    from src.query_expander import load_synonym_dict
+    _syn = load_synonym_dict()
+    logger.info("[RAG-启动] 同义词词典加载: %.3fs | %d条", time.time() - t, len(_syn))
+
+    # ⑦ CrossEncoder 预热推理（消除首次 predict 的 torch warmup）
+    if _reranker is not None:
+        t = time.time()
+        _reranker.predict([["预热", "预热"]])
+        logger.info("[RAG-启动] CrossEncoder预热推理: %.3fs", time.time() - t)
+
+    logger.info("[RAG-启动] 全部组件初始化完成: %.3fs", time.time() - t_all)
+
+
 def _faiss_search(query: str, top_k: int = FAISS_RECALL_TOP_K) -> List[str]:
     """FAISS 粗排，返回候选文本列表"""
     if _index is None or not _chunks:
@@ -305,6 +379,11 @@ def search_terms(query: str, top_k: int = 3, llm=None) -> List[str]:
     # 记录 LLM 改写后的 query + 初始化管线统计
     global _last_rag_query, _last_rag_pipeline_stats
     _last_rag_query = query
+
+    _t_start = time.time()
+    # 组件状态确认：第二次请求起三者应全为 True，否则说明单例未生效
+    logger.info("[RAG-请求] 组件状态: jieba已加载=%s | BM25已构建=%s | CrossEncoder已加载=%s",
+                jieba.dt.initialized, _bm25_index is not None, _reranker is not None)
     
     # 统一召回：hybrid_search
     recall_results = hybrid_search(query, top_k=30)
@@ -314,6 +393,7 @@ def search_terms(query: str, top_k: int = 3, llm=None) -> List[str]:
             "rerank_total_scored": 0, "rerank_above_threshold": 0,
             "final_returned_count": 0, "final_returned_ids": [], "empty_result": True
         })
+        logger.info("[RAG-计时] 总耗时: %.3fs（无召回，提前返回）", time.time() - _t_start)
         return [RAG_EMPTY_RESULT]
     
     # 提取候选内容（保留 id 映射）
@@ -331,10 +411,14 @@ def search_terms(query: str, top_k: int = 3, llm=None) -> List[str]:
     # 精排：根据环境选择
     use_local_rerank = os.environ.get("USE_LOCAL_RERANK", "true").lower() == "true"
     
+    _t_rerank = time.time()
     if use_local_rerank:
         reranked = _rerank_by_cross_encoder(query, candidates, top_k=top_k)
     else:
         reranked = _rerank_by_dashscope(query, candidates, top_k=top_k)
+    logger.info("[RAG-计时] ⑥精排(%s): %.3fs | 输入%d条→输出%d条",
+                "CrossEncoder" if use_local_rerank else "qwen3-rerank",
+                time.time() - _t_rerank, len(candidates), len(reranked))
     
     # 补充精排统计
     if not reranked or reranked == [RAG_EMPTY_RESULT]:
@@ -345,6 +429,7 @@ def search_terms(query: str, top_k: int = 3, llm=None) -> List[str]:
             "final_returned_ids": [],
             "empty_result": True
         })
+        logger.info("[RAG-计时] 总耗时: %.3fs（精排后为空）", time.time() - _t_start)
         return [RAG_EMPTY_RESULT]
     
     # enriched text → 原始 content → chunk_id
@@ -358,6 +443,7 @@ def search_terms(query: str, top_k: int = 3, llm=None) -> List[str]:
         "empty_result": False
     })
     
+    logger.info("[RAG-计时] 总耗时: %.3fs", time.time() - _t_start)
     return original_results
 
 
@@ -656,18 +742,32 @@ def hybrid_search(query: str, top_k: int = 10) -> List[Dict]:
     expanded_query = replace_insurance_abbreviation(query, insurance_type)
     
     # 3. 查询扩展（仅用于 BM25，向量检索用原始 query 避免语义污染）
+    _t = time.time()
     bm25_query = expand_query(expanded_query, insurance_type)
+    logger.info("[RAG-计时] ①查询扩展: %.3fs | 原始=%s | 扩展后=%s",
+                time.time() - _t, query, bm25_query)
     
     # 4. 双路检索
+    _t = time.time()
     vector_results = vector_search(expanded_query, top_k=50)
+    logger.info("[RAG-计时] ②向量检索: %.3fs | 召回%d条", time.time() - _t, len(vector_results))
+
+    _t = time.time()
     bm25_results = bm25_search(bm25_query, top_k=50)
+    logger.info("[RAG-计时] ③BM25检索: %.3fs | 召回%d条", time.time() - _t, len(bm25_results))
     
     # 5. Metadata 过滤
+    _t = time.time()
     vector_filtered = filter_by_insurance_type(vector_results, insurance_type)
     bm25_filtered = filter_by_insurance_type(bm25_results, insurance_type)
+    logger.info("[RAG-计时] ④结果过滤: %.3fs | 向量%d→%d | BM25 %d→%d",
+                time.time() - _t, len(vector_results), len(vector_filtered),
+                len(bm25_results), len(bm25_filtered))
     
     # 6. RRF 融合
+    _t = time.time()
     final_results = rrf_fuse(vector_filtered, bm25_filtered, top_k=top_k)
+    logger.info("[RAG-计时] ⑤RRF融合: %.3fs | 融合后%d条", time.time() - _t, len(final_results))
     
     # 存储中间统计（供 search_terms 组合完整管线数据）
     global _last_rag_pipeline_stats

@@ -91,11 +91,7 @@ def classify(message: str, llm) -> L2Result:
                 alt_intent = alt.get("intent", "")
                 if alt_intent not in INTENT_VALUES or alt_intent == intent:
                     continue
-                try:
-                    alt_conf = max(0.0, min(1.0, float(alt.get("confidence", 0.0))))
-                except (ValueError, TypeError):
-                    alt_conf = 0.0
-                alternatives.append({"intent": alt_intent, "confidence": alt_conf})
+                alternatives.append({"intent": alt_intent})
 
         result = L2Result(
             intent=intent,
@@ -104,15 +100,14 @@ def classify(message: str, llm) -> L2Result:
             alternatives=alternatives,
         )
         if alternatives:
-            logger.info("[L2] intent=%s confidence=%.2f sentiment=%s | top2=%s %.2f margin=%.2f",
-                         intent, confidence, sentiment,
-                         alternatives[0]["intent"], alternatives[0]["confidence"],
-                         confidence - alternatives[0]["confidence"])
+            logger.info("[L2] intent=%s confidence=%.2f sentiment=%s | top2=%s",
+                         intent, confidence, sentiment, alternatives[0]["intent"])
         else:
             logger.info("[L2] intent=%s confidence=%.2f sentiment=%s",
                          intent, confidence, sentiment)
         return result
 
-    except Exception as e:
-        logger.error("[L2] LLM 调用失败: %s", e)
+    except Exception:
+        # 打印完整异常链（含底层连接错误），再走 general 兜底（路由层容错，不中断请求）
+        logger.exception("[L2] LLM 调用失败")
         return L2Result(intent=INTENT_GENERAL, confidence=0.2, sentiment=SENTIMENT_NEUTRAL)

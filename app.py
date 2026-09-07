@@ -28,22 +28,31 @@ if __name__ == "__main__":
     # ---------- 预加载：启动时加载所有模型 ----------
     logger.info("正在预加载模型...")
     from src.chains.chains import init_graph
-    from src.rag import init_rag
+    from src.rag import init_rag_components
 
     try:
         # 初始化 StateGraph 编排图
-        graph, llm = init_graph()
+        graph, llm, llm_classifier = init_graph()
         set_graph(graph)
-        # 初始化 RAG（加载 FAISS 索引和模型）
-        init_rag()
+        # 初始化 RAG（启动预加载全部组件：FAISS/Embedding/CrossEncoder/jieba/BM25/词典 + 预热推理）
+        init_rag_components()
         logger.info("预加载完成")
     except Exception as e:
         logger.warning("预加载失败: %s，服务仍会启动，但第一条消息可能较慢", e)
 
+    # ---------- 连接层诊断：主动测 classifier(dashscope)+deepseek 的 DNS/TCP/TLS 分段耗时 ----------
+    # 判断偶发 TLS 握手卡死是本机网络还是代码问题；默认关闭，LLM_CONN_DIAG=1 开启。
+    if os.environ.get("LLM_CONN_DIAG", "0") == "1":
+        try:
+            from src.utils.conn_diag import startup_diagnose
+            startup_diagnose()
+        except Exception as e:
+            logger.warning("连接层诊断失败（不影响服务）: %s", e)
+
     # ---------- 连接预热：提前建立到 LLM API 的 TCP/TLS 连接 ----------
     try:
         from src.chains.chains import warmup_llm
-        warmup_llm(llm)
+        warmup_llm(llm, llm_classifier)
     except Exception as e:
         logger.warning("LLM API 预热失败（不影响服务）: %s", e)
 
