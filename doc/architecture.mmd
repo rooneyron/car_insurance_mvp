@@ -11,11 +11,10 @@ graph TB
     end
 
     subgraph LangGraph StateGraph
-        D["router 节点 · 五层漏斗<br/>src/router/<br/>L0 安全拦截 → DST 逃生承接 →<br/>L1 关键词 → L2 小模型分类 →<br/>L3 大模型复核 → L4 澄清/转人工"]
-        D2["prepare_input 节点<br/>src/chains/chains.py<br/>构建纯净 responder_input<br/>摘要记忆 + 当前用户消息 + 最近工具结果对"]
-        E["planner 节点<br/>src/chains/chains.py<br/>非流式 LLM 决策 · bind_tools<br/>强制清空 content 防废话"]
-        F["tools 节点<br/>src/chains/chains.py<br/>ToolNode 执行 · 短路检测<br/>转人工/RAG连续空结果 → direct_response"]
-        G["responder 节点<br/>src/chains/chains.py<br/>流式 LLM 生成最终答案<br/>仅使用 responder_input"]
+        D["router 节点 · 五层漏斗<br/>src/router/<br/>L0 安全拦截 → DST 逃生承接 →<br/>L1 关键词 → L2 小模型分类 →<br/>L3 大模型复核（sale/service 边界）→ L4 澄清/转人工"]
+        D2["prepare_input 节点<br/>src/chains/chains.py<br/>构建 responder_input（惰性保留待清理）"]
+        E["agent 节点 · 异步流式<br/>src/chains/chains.py<br/>bind_tools 决策 · astream 流式直出<br/>调工具轮清空 content /<br/>直接回复轮 content 即终答"]
+        F["tools 节点<br/>src/chains/chains.py<br/>ToolNode 执行 · 短路检测<br/>转人工/RAG 连续空结果 →<br/>direct_response"]
     end
 
     subgraph 工具层
@@ -31,30 +30,35 @@ graph TB
     end
 
     subgraph 基础设施
-        N["DeepSeek API<br/>LLM 推理"]
-        O["MemorySaver<br/>对话记忆"]
-        P["SummarizationNode<br/>2000 token 摘要 → 500 token"]
+        N["LLM 推理 · 多模型混合<br/>agent + L3复核 = DeepSeek<br/>L2分类 = 低成本可配模型（qwen-turbo）"]
+        O["MemorySaver<br/>对话记忆 · checkpointer<br/>thread_id 隔离"]
+        P["SummarizationNode<br/>进图前 update_state 注入历史摘要<br/>2000 token → 500 token"]
+        Q["conn_diag 连接诊断<br/>agent 连接异常时 HTTP 诊断<br/>超时/重试/HTTP-DIAG"]
     end
 
     A --> C
     B --> C
-    C -->|"state.graph.astream_events"| D
-    D -->|"action=route · 正常路由"| D2
-    D -->|"action=clarify · L4 澄清"| G
-    D -->|"action=handoff · L4 转人工"| END_NODE
-    D2 -->|"prepare_input → planner"| E
+    C -->|"astream_events"| D
+    D -->|"route"| D2
+    D -->|"clarify · 直返"| END_NODE
+    D -->|"handoff · 直返"| END_NODE
+    D2 -->|"prepare_input → agent"| E
     E -->|"有 tool_calls"| F
-    E -->|"无 tool_calls"| G
-    F -->|"direct_response 非空 · 短路直返"| END_NODE
-    F -->|"回到 planner · ReAct 循环"| E
-    G --> END_NODE
+    E -->|"无 tool_calls · 直出终答"| END_NODE
+    F -->|"短路直返"| END_NODE
+    F -->|"ReAct 循环"| E
     F --> H
     F --> I
     F --> J
     F --> K
     J --> L
     L --> M
-    E --> N
-    G --> N
-    C -.->|"历史摘要 · 进图前 update_state"| P
-    C -.->|"checkpointer · thread_id 隔离"| O
+    M ~~~ N
+    M ~~~ O
+    M ~~~ P
+    M ~~~ Q
+    %% 上述隐形边：把基础设施集群整体压到 RAG 层之下（最底排），
+    %% 避免它与 StateGraph 集群同排并置、挤占中部宽度；
+    %% 且不再从 E 拉真边到 N/Q（长边会把底排节点拽向两侧、撑宽画布），
+    %% 调用语义已写进 N/Q 节点标签。
+    %% 注意：%% 注释不能写在 ~~~ 隐形边之前（mermaid.ink 解析会 400）

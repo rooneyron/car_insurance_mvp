@@ -120,7 +120,7 @@ def create_gradio_interface():
             assistant_idx = len(chat_history) - 1
             last_metadata = None
             lines = []              # 已定型展示行：[("thinking"/"tool"/"answer", text)]，多轮思考全部保留
-            cur_stream = ""         # 当前 planner 轮正在流式的文本（角色待定）
+            cur_stream = ""         # 当前 agent 轮正在流式的文本（角色待定）
             
             async for partial_text, metadata in chat_api_stream(session_id, message):
                 if metadata and metadata.get("error"):

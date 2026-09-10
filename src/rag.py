@@ -195,21 +195,25 @@ def init_rag_components():
       - BM25 索引 + chunk 元数据 + 自定义词典
       - 同义词词典
       - CrossEncoder 预热推理（消除首次 predict 的 torch warmup）
-    各组件均有全局守卫，幂等可重复调用。生产模式（USE_LOCAL_RERANK=false）跳过本地 CrossEncoder。
+    各组件均有全局守卫，幂等可重复调用。生产模式（USE_LOCAL_RERANK=false）跳过本地 CrossEncoder 与 torch import。
     """
     global _index, _chunks, _embedding_model, _reranker
     t_all = time.time()
 
-    # torch CPU 推理线程数：实测本机 8 线程最优（默认仅 6 偏保守，>8 因超线程争抢反而慢）。
-    # 只改并行度、不改模型/候选/检索逻辑，精排分数完全一致=零质量损失。可用 RERANK_NUM_THREADS 覆盖。
-    import torch
-    try:
-        _n_threads = int(os.environ.get("RERANK_NUM_THREADS", "8"))
-    except ValueError:
-        logger.warning("RERANK_NUM_THREADS=%r 非法，回退为默认 8", os.environ.get("RERANK_NUM_THREADS"))
-        _n_threads = 8
-    torch.set_num_threads(_n_threads)
-    logger.info("[RAG-启动] torch推理线程数设为: %d（实测8最优）", _n_threads)
+    # 生产模式不加载本地 Rerank，也不 import torch（requirements-prod 部署环境无 torch，
+    # 无条件 import 会让整个预加载 abort、只剩一条 warning）；仅本地精排模式设置推理线程。
+    use_local_rerank = os.environ.get("USE_LOCAL_RERANK", "true").lower() == "true"
+    if use_local_rerank:
+        # torch CPU 推理线程数：实测本机 8 线程最优（默认仅 6 偏保守，>8 因超线程争抢反而慢）。
+        # 只改并行度、不改模型/候选/检索逻辑，精排分数完全一致=零质量损失。可用 RERANK_NUM_THREADS 覆盖。
+        import torch
+        try:
+            _n_threads = int(os.environ.get("RERANK_NUM_THREADS", "8"))
+        except ValueError:
+            logger.warning("RERANK_NUM_THREADS=%r 非法，回退为默认 8", os.environ.get("RERANK_NUM_THREADS"))
+            _n_threads = 8
+        torch.set_num_threads(_n_threads)
+        logger.info("[RAG-启动] torch推理线程数设为: %d（实测8最优）", _n_threads)
 
     # ① jieba 分词器（预热词典，避免首请求 Building prefix dict）
     t = time.time()
@@ -229,7 +233,6 @@ def init_rag_components():
     logger.info("[RAG-启动] Embedding模型加载: %.3fs", time.time() - t)
 
     # ④ CrossEncoder 精排模型（仅本地精排模式）
-    use_local_rerank = os.environ.get("USE_LOCAL_RERANK", "true").lower() == "true"
     if use_local_rerank:
         t = time.time()
         if _reranker is None:

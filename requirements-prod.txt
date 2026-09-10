@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 fastapi
 uvicorn
 gradio==6.19.0
@@ -12,4 +13,9 @@ numpy
 langchain-text-splitters
 langmem
 fastembed
-# 注意：没有 sentence-transformers，生产环境不会加载 Rerank
+jieba                   # RAG BM25 中文分词
+rank-bm25               # RAG BM25 双路召回
+PyYAML                  # router L0/L1 加载 config.yaml
+httpx                   # chains.py LLM 连接池 / 连接诊断
+requests                # rag.py DashScope qwen3-rerank 精排
+# 注意：没有 sentence-transformers / torch，生产环境不会加载本地 Rerank

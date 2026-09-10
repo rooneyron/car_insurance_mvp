@@ -330,7 +330,7 @@ async def _chat_api_stream_inner(session_id: str, message: str):
 
         full_text = ""
         current_text = ""          # 最终 yield 的文本（正常路径=最后一轮 answer；短路=direct_response）
-        round_index = 0            # 当前 planner 轮次（每次 on_tool_start 后 +1）
+        round_index = 0            # 当前 agent 轮次（每次 on_tool_start 后 +1）
         round_text = ""            # 当前轮 content 累积（每轮重置，不再跨轮拼接成一段）
         transfer_detected = False
         route = Route.GENERAL
@@ -355,11 +355,11 @@ async def _chat_api_stream_inner(session_id: str, message: str):
                 kind = event.get("event", "")
                 node_name = event.get("metadata", {}).get("langgraph_node", "")
 
-                # ---- 工具开始 → 当前 planner 轮的 content 定性为"思考"，随后进入下一轮 ----
+                # ---- 工具开始 → 当前 agent 轮的 content 定性为"思考"，随后进入下一轮 ----
                 if kind == "on_tool_start":
                     tool_name = event.get("name", "")
                     label = TOOL_LABELS.get(tool_name, tool_name)
-                    yield "", {"tool_status": f"正在调用 {label}...", "planner_round": round_index, "role": "thinking"}
+                    yield "", {"tool_status": f"正在调用 {label}...", "agent_round": round_index, "role": "thinking"}
                     if tool_name == TOOL_TRANSFER_NAME:
                         transfer_detected = True
                     round_index += 1
@@ -370,12 +370,12 @@ async def _chat_api_stream_inner(session_id: str, message: str):
                 elif kind == "on_tool_end":
                     tool_name = event.get("name", "")
                     label = TOOL_LABELS.get(tool_name, tool_name)
-                    yield "", {"tool_status": f"{label} 调用完成", "planner_round": round_index - 1, "role": "tool"}
+                    yield "", {"tool_status": f"{label} 调用完成", "agent_round": round_index - 1, "role": "tool"}
 
-                # ---- LLM 流式输出（仅 planner 节点：responder 已删除，planner 直接对前端）----
+                # ---- LLM 流式输出（仅 agent 节点：agent 直接对前端产出终答）----
                 elif kind == "on_chat_model_stream":
-                    if node_name != "planner":
-                        continue  # 忽略 router(分类器/评审) 等非 planner 节点的模型输出
+                    if node_name != "agent":
+                        continue  # 忽略 router(分类器/评审) 等非 agent 节点的模型输出
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and chunk.content and isinstance(chunk.content, str):
                         # 已触发降级 → 跳过后续输出
@@ -390,7 +390,7 @@ async def _chat_api_stream_inner(session_id: str, message: str):
                         round_text += chunk.content
                         current_text = round_text
                         full_text = current_text
-                        yield round_text, {"planner_round": round_index, "role": "streaming"}
+                        yield round_text, {"agent_round": round_index, "role": "streaming"}
 
                         # ---- 同步攒 buffer 检测 DSML（不阻塞输出）----
                         if not _dsml_detected and len(_dsml_buffer) < _DSML_DETECT_LEN:
@@ -402,7 +402,7 @@ async def _chat_api_stream_inner(session_id: str, message: str):
                                     round_text = _DSML_FALLBACK
                                     current_text = round_text
                                     full_text = current_text
-                                    yield round_text, {"planner_round": round_index, "role": "streaming"}
+                                    yield round_text, {"agent_round": round_index, "role": "streaming"}
 
                 # ---- LLM 调用结束 → 捕获 Token 用量 ----
                 elif kind == "on_chat_model_end":
@@ -486,7 +486,7 @@ async def _chat_api_stream_inner(session_id: str, message: str):
             "elapsed_ms": elapsed_ms,
             "router_source": router_source,
             "router_confidence": router_confidence,
-            "planner_round": round_index,
+            "agent_round": round_index,
             "role": "answer",
         }
         yield current_text, metadata

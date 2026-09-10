@@ -1,6 +1,6 @@
 """
-四层漏斗路由器
-L0 安全拦截 → L1 关键词 → L2 小模型分类 → L3 大模型复核 → L4 澄清/转人工
+五层漏斗路由器
+L0 安全拦截 → DST 跨轮承接 → L1 关键词 → L2 小模型分类 → L3 大模型复核 → L4 澄清/转人工
 """
 
 from src.router.router import route_message, RouterConfig

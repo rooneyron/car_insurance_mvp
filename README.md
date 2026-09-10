@@ -4,18 +4,18 @@
 
 ## 项目状态
 
-- ✅ 三级路由策略（关键词 → 轻量级小模型意图识别 → 会话状态复用）
-- ✅ LangGraph 手写 StateGraph 4 节点编排（router → planner ⇄ tools → responder → END）
+- ✅ 五层路由漏斗（L0 安全拦截 → DST 跨轮承接 → L1 关键词 → L2 小模型分类 → L3 大模型复核 → L4 澄清/转人工）
+- ✅ LangGraph 手写 StateGraph 4 节点编排（router → prepare_input → agent ⇄ tools → END）
 - ✅ 跨轮 Memory 记忆管理 + 上下文摘要压缩（2000 token 阈值 → 500 token 摘要）
 - ✅ RAG 向量检索（FAISS + BGE-Reranker 本地重排序）
-- ✅ 工具调用（查保单、算保费、转人工）
+- ✅ 工具调用（查保单、算保费、条款检索 RAG、转人工）
 - ✅ Gradio 交互界面（三栏演示面板）
 - ✅ JWT Token 访问控制（7 天有效期 + 前端到期展示）
 - ✅ 每日 Token 限额管理
 - ✅ 全链路 trace_id 日志追踪（contextvars + logging Filter 零侵入）
 - ✅ RAGAS 质量评估（answer_relevancy 指标量化 RAG 链路质量）
 - ✅ 流式输出终局确认策略（消除多轮工具调用中间文本闪烁）
-- ✅ LLM 连接预热 + httpx 连接池 keep-alive
+- ✅ LLM 连接预热 + httpx 连接池 keep-alive + 超时/重试/连接诊断（conn_diag）
 - ✅ 公网部署（Render）
 - ✅ Docker 容器化支持
 
@@ -36,12 +36,12 @@
 
 | 功能 | 说明 |
 |------|------|
-| 路由决策 | 关键词优先 + 会话状态复用 + 轻量级小模型意图识别 |
+| 路由决策 | 五层漏斗：L0 安全拦截 + DST 跨轮承接 + L1 关键词 + L2 小模型分类 + L3 大模型复核 + L4 澄清/转人工 |
 | 跨轮记忆 | 多轮对话上下文记忆，超 2000 token 自动摘要压缩至 500 token |
 | RAG 检索 | FAISS 向量检索 + BGE-Reranker 本地重排序，阈值可配置 |
-| 工具调用 | 保费计算、保单查询、转人工（function calling） |
-| Agent 编排 | 手写 StateGraph 4 节点（router/planner/tools/responder），条件边动态调度 |
-| 流式输出 | 仅 responder 节点文本到达前端，planner 内部输出完全过滤，消除中间文本闪烁 |
+| 工具调用 | 保费计算、保单查询、条款检索（RAG）、转人工（function calling） |
+| Agent 编排 | 手写 StateGraph 4 节点（router/prepare_input/agent/tools），条件边动态调度 |
+| 流式输出 | agent 异步流式直出终答，调工具轮 content 清空、直接回复轮流式推前端 |
 | 访问控制 | JWT Token 认证，7 天有效期，前端展示到期时间 |
 | 质量评估 | RAGAS 量化评估 RAG 链路质量 |
 | 成本控制 | 每日 Token 限额，JSON 日志记录 |
@@ -126,14 +126,22 @@ car_insurance_mvp/
 │   ├── constants.py            #   跨模块常量
 │   ├── error_types.py          #   错误码与用户提示文案
 │   ├── route_types.py          #   路由枚举（售前/售后/通用）
-│   ├── core/
-│   │   └── routing.py          #   路由决策模块（关键词 + 小模型）
+│   ├── router/                 #   五层路由漏斗（L0安全 → DST承接 → L1关键词 → L2小模型 → L3大模型复核 → L4澄清/转人工）
+│   │   ├── router.py           #     漏斗编排主入口 route_message
+│   │   ├── l0_safety.py        #     L0 安全拦截（投诉/监管/转人工关键词）
+│   │   ├── dst.py              #     DST 跨轮承接（参数补全逃生机制）
+│   │   ├── l1_keyword.py       #     L1 关键词分层（high 拦截 / mid 透传 L2）
+│   │   ├── l2_classifier.py    #     L2 小模型意图分类（低成本快速）
+│   │   ├── l3_reviewer.py      #     L3 大模型复核（sale/service 边界犹豫）
+│   │   ├── l4_fallback.py      #     L4 澄清 / 转人工兜底
+│   │   ├── prompts.py          #     L2/L3 prompt 模板
+│   │   └── schemas.py          #     路由结果数据结构
 │   ├── chains/
-│   │   └── chains.py           #   LangGraph StateGraph 编排（图构建 + 摘要节点）
-│   ├── memory/
-│   │   └── __init__.py         #   跨轮 Memory 管理
-│   └── tools/
-│       └── __init__.py         #   工具函数（查保单 / 算保费 / 转人工）
+│   │   └── chains.py           #   LangGraph StateGraph 编排 + 工具定义（@tool）+ 摘要节点
+│   ├── utils/
+│   │   └── conn_diag.py        #   LLM 连接诊断（超时/重试/HTTP-DIAG）
+│   └── memory/
+│       └── __init__.py         #   跨轮 Memory 管理
 │
 ├── tests/                      # 测试与评估脚本
 │   ├── test_demo.py            #   端到端演示测试
@@ -170,7 +178,7 @@ car_insurance_mvp/
 | FastEmbed 替代 sentence-transformers | 内存占用 800MB → 300MB，优化部署性能 |
 | JWT + 每日限额 | 访问控制 + 成本管控双重保障 |
 | 上下文摘要压缩 | 2000 token 阈值触发，压缩至 500 token 摘要 |
-| 手写 StateGraph 4 节点 | router → planner ⇄ tools → responder，替代 create_react_agent 黑箱 |
+| 手写 StateGraph 4 节点 | router → prepare_input → agent ⇄ tools，替代 create_react_agent 黑箱 |
 | 终局确认流式策略 | 缓冲所有中间轮次文本，仅最终答案分块输出，消除闪烁 |
 | 全链路 trace_id | contextvars + logging Filter，业务代码零侵入 |
 | Git 功能分支工作流 | feature/* 分支 + 结构化提交 |
