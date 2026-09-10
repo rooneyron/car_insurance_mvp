@@ -10,7 +10,8 @@ SERVICE_NAME = "car_insurance_mvp"
 RAG_EMPTY_RESULT = "__RAG_EMPTY__"  # 哨兵值，用于 rag.py 返回空结果时比较
 RAG_CHUNK_SIZE = 500
 RAG_CHUNK_OVERLAP = 50
-FAISS_RECALL_TOP_K = 10
+VECTOR_RECALL_TOP_K = 50
+EMBEDDING_DIM = 512             # 向量维度（bge-small-zh-v1.5 实测）· db.py vector(N) 列 + tools 灌库断言共用，跨文件须一致
 
 # ---------- 工具层信号 ----------
 TOOL_TRANSFER_NAME = "transfer_to_human"

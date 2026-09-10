@@ -8,14 +8,15 @@ langchain
 langchain-openai
 langgraph
 openai
-faiss-cpu
-numpy
+faiss-cpu               # 保留 · 预留熔断降级（当前向量检索由 pgvector 执行）
+numpy                   # 保留 · faiss-cpu 依赖 + 预留熔断降级
 langchain-text-splitters
 langmem
 fastembed
-jieba                   # RAG BM25 中文分词
-rank-bm25               # RAG BM25 双路召回
+jieba                   # RAG 查询/入库中文分词（喂给 pg_search BM25）
+rank-bm25               # 保留 · 预留熔断降级（当前 BM25 由 pg_search 执行）
 PyYAML                  # router L0/L1 加载 config.yaml
 httpx                   # chains.py LLM 连接池 / 连接诊断
 requests                # rag.py DashScope qwen3-rerank 精排
+psycopg2-binary>=2.9    # ParadeDB(pgvector + pg_search) 连接 · src/db.py
 # 注意：没有 sentence-transformers / torch，生产环境不会加载本地 Rerank

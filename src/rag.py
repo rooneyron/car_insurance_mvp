@@ -1,20 +1,22 @@
 """
-RAG 向量检索模块
-支持两种模式：
-- 本地模式（USE_LOCAL_RERANK=true）：FAISS + Cross-Encoder Rerank + 阈值过滤
-- 生产模式（USE_LOCAL_RERANK=false）：FAISS 召回 + LLM 相关性分类 + 降级
+RAG 检索模块（ParadeDB 存储层）
+双路召回：pgvector(HNSW, 余弦) + pg_search(BM25, whitespace 分词) → RRF 融合 → 精排。
+精排两种模式：
+- 本地模式（USE_LOCAL_RERANK=true）：Cross-Encoder Rerank + 阈值过滤
+- 生产模式（USE_LOCAL_RERANK=false）：DashScope qwen3-rerank API 精排 + 阈值过滤
 """
 
 import os
 import re
-import pickle
 import time
-import numpy as np
+import threading
 from typing import List, Dict, Tuple, Optional
-import faiss
 import jieba
+import psycopg2
+from psycopg2.extras import execute_values, Json
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from src.constants import RAG_EMPTY_RESULT, RAG_CHUNK_SIZE, RAG_CHUNK_OVERLAP, FAISS_RECALL_TOP_K
+from src.constants import RAG_EMPTY_RESULT, RAG_CHUNK_SIZE, RAG_CHUNK_OVERLAP, VECTOR_RECALL_TOP_K
+from src.db import get_conn
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -22,21 +24,87 @@ logger = get_logger(__name__)
 # ---------- 全局配置 ----------
 EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
 RERANK_MODEL = "BAAI/bge-reranker-base"
+RERANK_MAX_LENGTH = 512         # CrossEncoder 序列长度上限（≠ embedding 维度 EMBEDDING_DIM，勿混淆）
 
-FAISS_INDEX_PATH = "data/faiss_index.bin"
-CHUNKS_PKL_PATH = "data/chunks.pkl"
 TERMS_FILE_PATH = "data/insurance_terms.txt"
 
 # RAG 检索质量阈值（Rerank 分数低于此值视为无效）
 RAG_SCORE_THRESHOLD = float(os.environ.get("RAG_SCORE_THRESHOLD", "0.6"))
 
 # ---------- 全局变量 ----------
-_index = None
-_chunks: List[Dict] = []
 _embedding_model = None
 _reranker = None
+_pg_ready = False  # PG 连通 + 元数据缓存就绪标志（供 search_terms 组件状态日志）
 _last_rag_pipeline_stats = {}  # 最近一次 RAG 管线统计（供评估脚本使用）
 _last_rag_query = ""  # 最近一次 RAG 工具接收到的 query（LLM 改写后的）
+
+# ---------- 熔断降级（PG 不可用时降级为大模型裸答） ----------
+class RAGRetrievalError(Exception):
+    """PG 检索异常（连接失败/查询异常）——区别于“检索无结果”的正常业务空返回。"""
+
+
+# 熔断打开时返回给上层的降级提示：chains.py/Agent 无需任何改动，
+# LLM 看到此上下文即会裸答并附带免责声明。
+RAG_FALLBACK_NOTICE = (
+    "【系统提示】知识库检索服务当前不可用，以下回答未参考车险条款原文，"
+    "仅基于通用保险知识，可能存在不准确之处，仅供参考。"
+)
+
+# 最近一次 vector/bm25 检索是否触发 psycopg2.Error（供 hybrid_search 判定 PG 运行时故障）
+_last_pg_error = False
+
+
+class SimpleCircuitBreaker:
+    """简易熔断器（无第三方依赖）：closed(正常) → open(熔断) → half_open(试探) 状态机。
+
+    仅“PG 连接/查询异常”计为失败；“检索无结果”属正常业务，不计失败、不触发熔断。
+    模块级单例，全局共享状态；用 Lock 保护状态迁移。
+    """
+    CLOSED, OPEN, HALF_OPEN = "closed", "open", "half_open"
+
+    def __init__(self, failure_threshold: int = 3, recovery_timeout: int = 30):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.state = self.CLOSED
+        self.failure_count = 0
+        self.last_failure_time = 0.0
+        self._lock = threading.Lock()
+
+    def allow_request(self) -> bool:
+        """是否放行本次检索。open 态超过恢复窗口后自动转 half_open 放行一次试探。"""
+        with self._lock:
+            if self.state == self.OPEN:
+                if time.time() - self.last_failure_time >= self.recovery_timeout:
+                    self.state = self.HALF_OPEN
+                    logger.info("[熔断器] open→half_open：已过恢复窗口 %ds，放行一次试探", self.recovery_timeout)
+                    return True
+                return False
+            return True  # CLOSED / HALF_OPEN 均放行
+
+    def record_success(self):
+        """检索成功（含正常空结果）：half_open→closed 恢复并重置失败计数。"""
+        with self._lock:
+            if self.state != self.CLOSED:
+                logger.info("[熔断器] %s→closed：PG 恢复正常，重置失败计数", self.state)
+            self.state = self.CLOSED
+            self.failure_count = 0
+
+    def record_failure(self):
+        """PG 异常：累加失败计数。half_open 试探失败立即回 open；closed 达阈值则熔断。"""
+        with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = time.time()
+            if self.state == self.HALF_OPEN:
+                self.state = self.OPEN
+                logger.info("[熔断器] half_open→open：试探失败，重新计时 %ds", self.recovery_timeout)
+            elif self.failure_count >= self.failure_threshold:
+                self.state = self.OPEN
+                logger.info("[熔断器] closed→open：连续失败 %d 次，熔断打开", self.failure_count)
+
+
+# 模块级单例：全局共享熔断状态（连续失败 3 次熔断，30s 后试探恢复）
+_circuit_breaker = SimpleCircuitBreaker(failure_threshold=3, recovery_timeout=30)
+
 
 def get_last_rag_pipeline_stats() -> dict:
     """获取最近一次 RAG 管线统计"""
@@ -98,47 +166,6 @@ def load_and_chunk_terms(file_path: str = TERMS_FILE_PATH) -> List[Dict[str, str
     return chunks
 
 
-# ---------- 2. 构建 & 持久化向量库 ----------
-def build_or_load_index() -> Tuple[faiss.Index, List[Dict]]:
-    """如果本地存在索引则加载，否则构建并保存"""
-    global _chunks, _embedding_model
-
-    if os.path.exists(FAISS_INDEX_PATH) and os.path.exists(CHUNKS_PKL_PATH):
-        logger.info("检测到本地索引文件，正在加载...")
-        index = faiss.read_index(FAISS_INDEX_PATH)
-        with open(CHUNKS_PKL_PATH, "rb") as f:
-            _chunks = pickle.load(f)
-        logger.info("加载成功，共 %d 个块", len(_chunks))
-        return index, _chunks
-
-    logger.info("未找到本地索引，开始构建...")
-
-    if _embedding_model is None:
-        logger.info("正在加载轻量级 Embedding 模型 (fastembed/bge-small-zh-v1.5)...")
-        from fastembed import TextEmbedding
-        _embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL)
-        logger.info("Embedding 模型加载完成")
-
-    chunks = load_and_chunk_terms()
-    _chunks = chunks
-    texts = [c["full_text"] for c in chunks]
-
-    vectors_generator = _embedding_model.embed(texts)
-    vectors = list(vectors_generator)
-    vector_array = np.array(vectors).astype('float32')
-
-    dim = vector_array.shape[1]
-    index = faiss.IndexFlatIP(dim)
-    index.add(vector_array)
-
-    faiss.write_index(index, FAISS_INDEX_PATH)
-    with open(CHUNKS_PKL_PATH, "wb") as f:
-        pickle.dump(chunks, f)
-
-    logger.info("构建完成，索引已保存至 %s", FAISS_INDEX_PATH)
-    return index, chunks
-
-
 # ---------- 2.5 HF 缓存路径解析 ----------
 def _resolve_hf_cached_path(repo_id: str) -> Optional[str]:
     """
@@ -162,17 +189,39 @@ def _resolve_hf_cached_path(repo_id: str) -> Optional[str]:
 
 
 # ---------- 3. 初始化 ----------
-def init_rag():
-    """初始化 RAG 系统，根据环境变量决定是否加载 Rerank 模型"""
-    global _index, _chunks, _embedding_model, _reranker
+def _check_pg_and_warm_cache():
+    """PG 连通性预检（SELECT 1）+ chunk 元数据缓存预热，置 _pg_ready。
 
-    _index, _chunks = build_or_load_index()
+    迁移 ParadeDB 后不再降级 FAISS：PG 不可用时检索返回空，由上层兜底。
+    """
+    global _pg_ready
+    try:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        finally:
+            conn.close()
+        _load_chunk_metadata()
+        _pg_ready = True
+        logger.info("[RAG-启动] PG 连通 + 元数据缓存预热完成 | %d 条 chunk", len(_chunk_metadata))
+    except psycopg2.Error as e:
+        _pg_ready = False
+        logger.error("[RAG-启动] PG 连通性预检失败：%s（检索将返回空，不降级 FAISS）", e)
+
+
+def init_rag():
+    """初始化 RAG 系统：Embedding 模型 + PG 连通预检 +（本地模式）Rerank 模型"""
+    global _embedding_model, _reranker
 
     if _embedding_model is None:
         logger.info("正在加载轻量级 Embedding 模型...")
         from fastembed import TextEmbedding
         _embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL)
         logger.info("Embedding 模型加载完成")
+
+    _check_pg_and_warm_cache()
 
     use_local_rerank = os.environ.get("USE_LOCAL_RERANK", "true").lower() == "true"
     if not use_local_rerank:
@@ -183,21 +232,21 @@ def init_rag():
         logger.info("正在加载本地 Rerank 模型 (BAAI/bge-reranker-base)，约 1.1GB...")
         from sentence_transformers import CrossEncoder
         model_path = _resolve_hf_cached_path(RERANK_MODEL) or RERANK_MODEL
-        _reranker = CrossEncoder(model_path, max_length=512, local_files_only=True)
+        _reranker = CrossEncoder(model_path, max_length=RERANK_MAX_LENGTH, local_files_only=True)
         logger.info("Rerank 模型加载完成 (path=%s)", model_path)
 
 
 def init_rag_components():
     """启动时一次性预加载所有 RAG 组件，避免首个请求触发懒加载。
 
-    相比 init_rag()（仅 FAISS + Embedding + CrossEncoder 模型），额外预加载：
-      - jieba 分词器词典（否则首请求 Building prefix dict 约 0.35s）
-      - BM25 索引 + chunk 元数据 + 自定义词典
+    相比 init_rag()（Embedding + CrossEncoder + PG 预检），额外预加载：
+      - jieba 分词器词典 + BM25 自定义术语（否则首请求 Building prefix dict 约 0.35s）
+      - PG 连通预检 + chunk 元数据缓存预热
       - 同义词词典
       - CrossEncoder 预热推理（消除首次 predict 的 torch warmup）
     各组件均有全局守卫，幂等可重复调用。生产模式（USE_LOCAL_RERANK=false）跳过本地 CrossEncoder 与 torch import。
     """
-    global _index, _chunks, _embedding_model, _reranker
+    global _embedding_model, _reranker
     t_all = time.time()
 
     # 生产模式不加载本地 Rerank，也不 import torch（requirements-prod 部署环境无 torch，
@@ -215,15 +264,16 @@ def init_rag_components():
         torch.set_num_threads(_n_threads)
         logger.info("[RAG-启动] torch推理线程数设为: %d（实测8最优）", _n_threads)
 
-    # ① jieba 分词器（预热词典，避免首请求 Building prefix dict）
+    # ① jieba 分词器（预热词典 + BM25 自定义术语，避免首请求 Building prefix dict）
     t = time.time()
     jieba.initialize()
+    _ensure_custom_dict()
     logger.info("[RAG-启动] jieba加载: %.3fs", time.time() - t)
 
-    # ② FAISS 索引 + chunks
+    # ② PG 连通预检 + chunk 元数据缓存预热（ParadeDB 存储层）
     t = time.time()
-    _index, _chunks = build_or_load_index()
-    logger.info("[RAG-启动] FAISS索引加载: %.3fs | %d条chunk", time.time() - t, len(_chunks))
+    _check_pg_and_warm_cache()
+    logger.info("[RAG-启动] PG预检+元数据预热: %.3fs | PG连通=%s", time.time() - t, _pg_ready)
 
     # ③ Embedding 模型
     t = time.time()
@@ -238,47 +288,24 @@ def init_rag_components():
         if _reranker is None:
             from sentence_transformers import CrossEncoder
             model_path = _resolve_hf_cached_path(RERANK_MODEL) or RERANK_MODEL
-            _reranker = CrossEncoder(model_path, max_length=512, local_files_only=True)
+            _reranker = CrossEncoder(model_path, max_length=RERANK_MAX_LENGTH, local_files_only=True)
         logger.info("[RAG-启动] CrossEncoder模型加载: %.3fs", time.time() - t)
     else:
         logger.info("[RAG-启动] 生产模式：跳过本地 CrossEncoder（精排走 qwen3-rerank API）")
 
-    # ⑤ BM25 索引（含 chunk 元数据 + 自定义词典）
-    t = time.time()
-    _init_bm25()
-    logger.info("[RAG-启动] BM25索引构建: %.3fs | %d条文档", time.time() - t, len(_bm25_corpus))
-
-    # ⑥ 同义词词典
+    # ⑤ 同义词词典
     t = time.time()
     from src.query_expander import load_synonym_dict
     _syn = load_synonym_dict()
     logger.info("[RAG-启动] 同义词词典加载: %.3fs | %d条", time.time() - t, len(_syn))
 
-    # ⑦ CrossEncoder 预热推理（消除首次 predict 的 torch warmup）
+    # ⑥ CrossEncoder 预热推理（消除首次 predict 的 torch warmup）
     if _reranker is not None:
         t = time.time()
         _reranker.predict([["预热", "预热"]])
         logger.info("[RAG-启动] CrossEncoder预热推理: %.3fs", time.time() - t)
 
     logger.info("[RAG-启动] 全部组件初始化完成: %.3fs", time.time() - t_all)
-
-
-def _faiss_search(query: str, top_k: int = FAISS_RECALL_TOP_K) -> List[str]:
-    """FAISS 粗排，返回候选文本列表"""
-    if _index is None or not _chunks:
-        init_rag()
-
-    query_embedding = list(_embedding_model.embed([query]))[0]
-    query_vec = np.array([query_embedding]).astype('float32')
-
-    retrieve_k = min(top_k, len(_chunks))
-    distances, indices = _index.search(query_vec, retrieve_k)
-
-    candidates = []
-    for idx in indices[0]:
-        if 0 <= idx < len(_chunks):
-            candidates.append(_chunks[idx]["full_text"])
-    return candidates
 
 
 # ---------- 4. 本地 Cross-Encoder Rerank ----------
@@ -385,11 +412,36 @@ def search_terms(query: str, top_k: int = 3, llm=None) -> List[str]:
 
     _t_start = time.time()
     # 组件状态确认：第二次请求起三者应全为 True，否则说明单例未生效
-    logger.info("[RAG-请求] 组件状态: jieba已加载=%s | BM25已构建=%s | CrossEncoder已加载=%s",
-                jieba.dt.initialized, _bm25_index is not None, _reranker is not None)
+    logger.info("[RAG-请求] 组件状态: jieba已加载=%s | PG连通=%s | CrossEncoder已加载=%s",
+                jieba.dt.initialized, _pg_ready, _reranker is not None)
     
-    # 统一召回：hybrid_search
-    recall_results = hybrid_search(query, top_k=30)
+    # 熔断闸门：open 态直接降级为大模型裸答提示，不走 PG 检索（避免反复超时浪费）
+    if not _circuit_breaker.allow_request():
+        logger.info("[熔断降级] 熔断器打开(open)，跳过检索直接返回降级提示 | query=%s", query)
+        _last_rag_pipeline_stats.update({
+            "rerank_total_scored": 0, "rerank_above_threshold": 0,
+            "final_returned_count": 0, "final_returned_ids": [],
+            "empty_result": True, "circuit_breaker": "open",
+        })
+        return [RAG_FALLBACK_NOTICE]
+
+    # 统一召回：hybrid_search（PG 连接/查询异常会抛 RAGRetrievalError）
+    try:
+        recall_results = hybrid_search(query, top_k=30)
+    except RAGRetrievalError as e:
+        # PG 异常 → 计失败（连续达阈值则熔断）+ 降级为裸答提示
+        _circuit_breaker.record_failure()
+        logger.info("[熔断降级] 检索异常，记熔断失败(count=%d, state=%s)：%s | 返回降级提示",
+                    _circuit_breaker.failure_count, _circuit_breaker.state, e)
+        _last_rag_pipeline_stats.update({
+            "rerank_total_scored": 0, "rerank_above_threshold": 0,
+            "final_returned_count": 0, "final_returned_ids": [],
+            "empty_result": True, "circuit_breaker": "failure",
+        })
+        return [RAG_FALLBACK_NOTICE]
+    else:
+        # 正常返回（含“无结果”的合法空返回）→ 记成功；half_open 试探成功即恢复 closed
+        _circuit_breaker.record_success()
     
     if not recall_results:
         _last_rag_pipeline_stats.update({
@@ -452,16 +504,22 @@ def search_terms(query: str, top_k: int = 3, llm=None) -> List[str]:
 
 # ---------- 6. 兼容旧接口 ----------
 def retrieve_candidates(query: str, top_k: int = 10) -> List[str]:
-    """仅执行 FAISS 检索，不进行任何过滤。保留给其他模块使用"""
-    return _faiss_search(query, top_k)
+    """仅执行向量检索（ParadeDB pgvector），不做险种过滤。保留给其他模块使用。"""
+    hits = vector_search(query, top_k=top_k)
+    if not hits:
+        return []
+    metadata = _load_chunk_metadata()
+    return [metadata[cid]["content"] for cid, _ in hits if cid in metadata]
 
 
 # =============================================================================
 # 混合检索模块：险种识别 + BM25 + Metadata过滤 + RRF融合
 # =============================================================================
 
-import json
 from collections import defaultdict
+
+# 通用条款标记（filter_by_insurance_type 保留匹配险种或通用的结果）
+GENERIC_INSURANCE_TYPE = "通用"
 
 # ---------- 险种别名表 ----------
 INSURANCE_ALIASES = {
@@ -488,29 +546,39 @@ BM25_CUSTOM_DICT = [
 
 # 全局变量
 _chunk_metadata: Dict[str, Dict] = {}
-_bm25_index = None
-_bm25_corpus: List[List[str]] = []
-_bm25_chunk_ids: List[str] = []
 
 
 def _load_chunk_metadata() -> Dict[str, Dict]:
-    """加载 chunk 元数据"""
+    """从 ParadeDB documents 表加载 chunk 元数据（id→{content,metadata}），带全局缓存。
+
+    id 统一转 str，与 rrf_fuse/filter_by_insurance_type 的字符串 id 约定对齐。
+    """
     global _chunk_metadata
-    if not _chunk_metadata:
-        metadata_path = "data/chunk_metadata.json"
-        if os.path.exists(metadata_path):
-            with open(metadata_path, "r", encoding="utf-8") as f:
-                _chunk_metadata = json.load(f)
-        else:
-            # 从 chunks.pkl 构建
-            if os.path.exists(CHUNKS_PKL_PATH):
-                with open(CHUNKS_PKL_PATH, "rb") as f:
-                    chunks = pickle.load(f)
-                _chunk_metadata = {
-                    str(i): {"content": c["content"], "metadata": c["metadata"]}
-                    for i, c in enumerate(chunks)
-                }
+    if _chunk_metadata:
+        return _chunk_metadata
+    try:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, content, metadata FROM documents")
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        _chunk_metadata = {
+            str(rid): {"content": content, "metadata": meta}
+            for rid, content, meta in rows
+        }
+    except psycopg2.Error as e:
+        logger.error("[RAG] 加载 chunk 元数据失败：%s", e)
+        _chunk_metadata = {}
     return _chunk_metadata
+
+
+def refresh_chunk_metadata_cache() -> Dict[str, Dict]:
+    """清空并重新加载 chunk 元数据缓存（灌库后调用，避免读到旧缓存）。"""
+    global _chunk_metadata
+    _chunk_metadata = {}
+    return _load_chunk_metadata()
 
 
 def _build_enriched_text(content: str, metadata: dict) -> str:
@@ -573,89 +641,150 @@ def replace_insurance_abbreviation(query: str, insurance_type: Optional[str]) ->
     return query
 
 
-# ---------- 3. BM25 关键词检索 ----------
-def _init_bm25():
-    """初始化 BM25 索引"""
-    global _bm25_index, _bm25_corpus, _bm25_chunk_ids
-    
-    if _bm25_index is not None:
+# ---------- 3. BM25 词典/分词 + 关键词检索（ParadeDB pg_search） ----------
+_jieba_dict_ready = False
+
+
+def _ensure_custom_dict():
+    """向 jieba 注入车险专业术语词典（幂等，全局守卫）。"""
+    global _jieba_dict_ready
+    if _jieba_dict_ready:
         return
-    
-    import jieba
-    from rank_bm25 import BM25Okapi
-    
-    # 添加自定义词典
     for term in BM25_CUSTOM_DICT:
         jieba.add_word(term)
-    
-    # 加载 chunk 数据
-    metadata = _load_chunk_metadata()
-    
-    _bm25_corpus = []
-    _bm25_chunk_ids = []
-    
-    for chunk_id in sorted(metadata.keys(), key=int):
-        chunk_data = metadata[chunk_id]
-        content = chunk_data["content"]
-        chunk_meta = chunk_data.get("metadata", {})
-        # 拼接 insurance_type 和 section 前缀，提升关键词匹配
-        enriched = _build_enriched_text(content, chunk_meta)
-        tokens = list(jieba.cut(enriched))
-        _bm25_corpus.append(tokens)
-        _bm25_chunk_ids.append(chunk_id)
-    
-    # 构建 BM25 索引
-    _bm25_index = BM25Okapi(_bm25_corpus)
-    logger.info("BM25 索引构建完成，共 %d 条文档", len(_bm25_corpus))
+    _jieba_dict_ready = True
 
 
-def bm25_search(query: str, top_k: int = 50) -> List[Tuple[str, float]]:
-    """
-    BM25 关键词检索
-    返回: [(chunk_id, score), ...] 按分数降序
-    """
-    import jieba
-    
-    _init_bm25()
-    
-    # 查询分词
-    query_tokens = list(jieba.cut(query))
-    
-    # BM25 检索
-    scores = _bm25_index.get_scores(query_tokens)
-    
-    # 获取 top_k
-    top_indices = np.argsort(scores)[::-1][:top_k]
-    
-    results = []
-    for idx in top_indices:
-        if scores[idx] > 0:
-            results.append((_bm25_chunk_ids[idx], float(scores[idx])))
-    
-    return results
+# BM25 token 中不允许出现的字符（pg_search whitespace 分词按空格切，标点会污染 term）
+_BM25_TOKEN_INVALID_CHARS = set(" \t\n():\"'{}[]^~*?\\/&|!+-")
 
 
-# ---------- 4. 向量检索（返回 chunk_id + score） ----------
-def vector_search(query: str, top_k: int = 50) -> List[Tuple[str, float]]:
+def _tokenize_for_bm25(text: str) -> List[str]:
+    """jieba 切分 + 过滤空/含标点 token，供 PG BM25 查询串使用。"""
+    tokens = []
+    for tok in jieba.cut(text):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if any(ch in _BM25_TOKEN_INVALID_CHARS for ch in tok):
+            continue
+        tokens.append(tok)
+    return tokens
+
+
+def bm25_search(query: str, top_k: int = VECTOR_RECALL_TOP_K) -> List[Tuple[str, float]]:
+    """PG BM25 检索：jieba 切分查询 → paradedb.parse → @@@ 匹配 content_tokens。
+
+    返回: [(chunk_id_str, score), ...] 按 BM25 分数降序。
     """
-    FAISS 向量检索
-    返回: [(chunk_id, score), ...] 按分数降序
+    _ensure_custom_dict()
+    tokens = _tokenize_for_bm25(query)
+    if not tokens:
+        return []
+    query_str = "content_tokens:(" + " ".join(tokens) + ")"
+    sql = (
+        "SELECT id, paradedb.score(id) FROM documents "
+        "WHERE id @@@ paradedb.parse(%s) "
+        "ORDER BY paradedb.score(id) DESC LIMIT %s"
+    )
+    try:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, (query_str, top_k))
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [(str(rid), float(score)) for rid, score in rows]
+    except psycopg2.Error as e:
+        global _last_pg_error
+        _last_pg_error = True  # 供 hybrid_search 判定 PG 运行时故障（触发熔断）
+        logger.error("[RAG] bm25_search 失败：%s", e)
+        return []
+
+
+# ---------- 4. 向量检索（ParadeDB pgvector, 余弦） ----------
+def _embed_texts(texts: List[str]) -> List[List[float]]:
+    """批量文本向量化（fastembed）。懒加载 _embedding_model。"""
+    global _embedding_model
+    if _embedding_model is None:
+        from fastembed import TextEmbedding
+        _embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL)
+    return [list(map(float, v)) for v in _embedding_model.embed(texts)]
+
+
+def _vec_literal(vec: List[float]) -> str:
+    """将 float 列表序列化为 pgvector 字面量 '[v1,v2,...]'。"""
+    return "[" + ",".join(repr(float(x)) for x in vec) + "]"
+
+
+def vector_search(query: str, top_k: int = VECTOR_RECALL_TOP_K) -> List[Tuple[str, float]]:
+    """PG 向量检索：query 向量化 → HNSW 余弦近邻（embedding <=> q）。
+
+    返回: [(chunk_id_str, cosine_sim), ...] 按相似度降序（sim = 1 - 余弦距离）。
     """
-    if _index is None or not _chunks:
-        init_rag()
-    
-    query_embedding = list(_embedding_model.embed([query]))[0]
-    query_vec = np.array([query_embedding]).astype('float32')
-    
-    retrieve_k = min(top_k, len(_chunks))
-    distances, indices = _index.search(query_vec, retrieve_k)
-    
-    results = []
-    for idx, score in zip(indices[0], distances[0]):
-        if 0 <= idx < len(_chunks):
-            results.append((str(idx), float(score)))
-    
-    return results
+    try:
+        q_vec = _embed_texts([query])[0]
+    except Exception as e:
+        logger.error("[RAG] vector_search 查询向量化失败：%s", e)
+        return []
+    literal = _vec_literal(q_vec)
+    sql = (
+        "SELECT id, 1 - (embedding <=> %s::vector) AS sim FROM documents "
+        "ORDER BY embedding <=> %s::vector LIMIT %s"
+    )
+    try:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, (literal, literal, top_k))
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [(str(rid), float(sim)) for rid, sim in rows]
+    except psycopg2.Error as e:
+        global _last_pg_error
+        _last_pg_error = True  # 供 hybrid_search 判定 PG 运行时故障（触发熔断）
+        logger.error("[RAG] vector_search 失败：%s", e)
+        return []
+
+
+# ---------- 4.5 入库（一次性灌库，tools/ingest_to_pg.py 调用） ----------
+def ingest_documents(chunks: List[Dict], embeddings: List[List[float]]) -> Dict:
+    """批量写入 documents 表（ON CONFLICT DO NOTHING 保证幂等）。
+
+    chunks: [{"id":int, "content":str, "metadata":dict, "content_tokens":str, "source":str}, ...]
+    embeddings: 与 chunks 等长的向量列表（已算好，dim 必须=512）。
+    返回: {"inserted":n, "skipped":m, "total":t}
+    """
+    if not chunks:
+        return {"inserted": 0, "skipped": 0, "total": 0}
+    if len(chunks) != len(embeddings):
+        raise ValueError(f"chunks({len(chunks)}) 与 embeddings({len(embeddings)}) 数量不一致")
+    values = [
+        (int(c["id"]), c["content"], Json(c.get("metadata", {})),
+         c.get("content_tokens", ""), c.get("source", ""), _vec_literal(embeddings[i]))
+        for i, c in enumerate(chunks)
+    ]
+    sql = (
+        "INSERT INTO documents (id, content, metadata, content_tokens, source, embedding) "
+        "VALUES %s ON CONFLICT (id) DO NOTHING"
+    )
+    conn = get_conn()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # 单批提交：execute_values 默认 page_size=100 会拆成多条 INSERT，
+                # 而 cur.rowcount 只反映最后一条 → inserted 计数失真（实测 128 条误报 28）。
+                # 本表数据量为百级，一次性提交使 rowcount = 真实插入行数，幂等重跑报告才准确。
+                execute_values(cur, sql, values,
+                               template="(%s, %s, %s, %s, %s, %s::vector)",
+                               page_size=len(values))
+                inserted = cur.rowcount
+        total = len(chunks)
+        return {"inserted": inserted, "skipped": total - inserted, "total": total}
+    finally:
+        conn.close()
 
 
 # ---------- 5. Metadata 过滤 ----------
@@ -678,18 +807,22 @@ def filter_by_insurance_type(
         chunk_ins_type = chunk_meta.get("metadata", {}).get("insurance_type", "")
         
         # 保留匹配或通用的结果
-        if chunk_ins_type == insurance_type or chunk_ins_type == "通用":
+        if chunk_ins_type == insurance_type or chunk_ins_type == GENERIC_INSURANCE_TYPE:
             filtered.append((chunk_id, score))
     
     return filtered
 
 
 # ---------- 6. RRF 融合 ----------
+# RRF 平滑常数（标准值 60：越大越弱化头部排名的优势）
+RRF_K = 60
+
+
 def rrf_fuse(
     vector_results: List[Tuple[str, float]],
     bm25_results: List[Tuple[str, float]],
     top_k: int = 10,
-    k: int = 60
+    k: int = RRF_K
 ) -> List[Dict]:
     """
     RRF (Reciprocal Rank Fusion) 融合两路检索结果
@@ -735,7 +868,10 @@ def hybrid_search(query: str, top_k: int = 10) -> List[Dict]:
     """
     混合检索主函数
     流程：险种识别 → 查询替换 → 查询扩展 → 向量检索 + BM25 → Metadata过滤 → RRF融合
+    PG 连接/查询异常时抛 RAGRetrievalError（供 search_terms 触发熔断降级）。
     """
+    global _last_pg_error
+    _last_pg_error = False  # 重置本轮 PG 故障标志（由 vector/bm25 的 except psycopg2.Error 置位）
     from src.query_expander import expand_query
     
     # 1. 险种识别
@@ -758,6 +894,11 @@ def hybrid_search(query: str, top_k: int = 10) -> List[Dict]:
     _t = time.time()
     bm25_results = bm25_search(bm25_query, top_k=50)
     logger.info("[RAG-计时] ③BM25检索: %.3fs | 召回%d条", time.time() - _t, len(bm25_results))
+
+    # 4.5 PG 故障检测：vector/bm25 内部捕获 psycopg2.Error 会置 _last_pg_error=True，
+    #     据此区分“PG 异常”与“正常无结果”（后者是合法业务空返回，不触发熔断）。
+    if _last_pg_error:
+        raise RAGRetrievalError("PG 检索异常（vector/bm25 连接或查询失败）")
     
     # 5. Metadata 过滤
     _t = time.time()

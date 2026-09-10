@@ -25,7 +25,7 @@ graph TB
     end
 
     subgraph RAG 检索层
-        L["FAISS 向量 + BM25 双路召回<br/>BM25 索引含【险种】【section】前缀"]
+        L["ParadeDB 双路召回<br/>pgvector 向量(HNSW) + pg_search BM25<br/>BM25 索引含【险种】【section】前缀"]
         M["RRF 融合 + BGE-Reranker 本地重排<br/>或 DashScope Rerank · 生产环境"]
     end
 

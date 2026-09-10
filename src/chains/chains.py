@@ -626,7 +626,7 @@ def _make_tools_node():
                     }, ensure_ascii=False)
                     break
                 if "未检索到相关保险条款" in content:
-                    # 统计历史 + 当前共多少次空检索结果，允许最多 3 次工具调用，多给 LLM 重试机会
+                    # 统计历史 + 当前共多少次空检索结果：第 1 次空回 agent 重试，第 2 次空即短路直返（最多 2 次工具调用）
                     empty_count = sum(
                         1 for m in messages
                         if isinstance(m, ToolMessage) and "未检索到相关保险条款" in str(m.content)
@@ -635,7 +635,7 @@ def _make_tools_node():
                         1 for m in result.get("messages", [])
                         if isinstance(m, ToolMessage) and "未检索到相关保险条款" in str(m.content)
                     )
-                    if empty_count >= 3:
+                    if empty_count >= 2:
                         direct_response = "很抱歉，我在知识库中没有找到与您问题相关的条款信息，建议您转人工咨询。"
                         break
                     else:
