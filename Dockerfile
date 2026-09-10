@@ -1,20 +1,16 @@
 FROM python:3.11-slim
-
 WORKDIR /app
 
-# 安装依赖（生产环境不含 sentence-transformers）
-COPY requirements-prod.txt .
-RUN pip install --no-cache-dir -r requirements-prod.txt
+# 清华pip加速，国内必加，否则下载很慢
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 复制项目代码
+COPY requirements.txt .
+RUN pip install --progress=on --timeout 1200 -r requirements.txt
+
+
 COPY . .
-
-# 创建数据目录
 RUN mkdir -p data
 
 EXPOSE 8000
-
-# 生产环境默认配置
 ENV USE_LOCAL_RERANK=false
-
 CMD ["python", "app.py"]
