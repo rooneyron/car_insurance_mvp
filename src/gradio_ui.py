@@ -9,6 +9,7 @@ import gradio as gr
 from src.chat import chat_api_stream
 from src.route_types import Route, ROUTE_LABELS
 from src.logger import get_logger
+from src.auth import validate_user_id
 
 logger = get_logger(__name__)
 
@@ -38,11 +39,30 @@ BOUNDARY = [
 
 def create_gradio_interface():
     with gr.Blocks(title="车险智能客服 MVP") as demo:
-        gr.Markdown("# 🚗 车险智能客服 MVP")
-        gr.Markdown("基于路由决策 + LangChain 构建")
-        
-        # Token 有效期显示
-        token_expiry_md = gr.HTML('<div id="token-expiry" style="display:none; color:#666; font-size:0.9em;"></div>', visible=True)
+        # ============================================================
+        # 顶部：左侧标题 + 右侧紧凑登录区（右上角内联）
+        # 登录区组件「始终可见」，仅切换 value/interactive，规避 Gradio 6.x
+        # 的 visible=False→True 首次不渲染缺陷（issue #12511）。
+        # ============================================================
+        with gr.Row():
+            # 左：标题 + Token 有效期
+            with gr.Column(scale=3):
+                gr.Markdown("# 🚗 车险智能客服 MVP")
+                gr.Markdown("基于路由决策 + LangChain 构建")
+                token_expiry_md = gr.HTML('<div id="token-expiry" style="display:none; color:#666; font-size:0.9em;"></div>', visible=True)
+            # 右：用户标识登录区（极简登录，为后续长期记忆功能预留 user_id）
+            with gr.Column(scale=2):
+                user_status_md = gr.Markdown("🔓 未登录（可选，用于保存对话记忆）")
+                with gr.Row():
+                    user_id_input = gr.Textbox(
+                        label="用户标识",
+                        placeholder="字母/数字/下划线/中文",
+                        scale=2,
+                    )
+                    # 单按钮两用：未登录=登录、已登录=退出（on_user_action 按当前状态判断）
+                    user_action_btn = gr.Button("登录", variant="primary", scale=1, size="sm")
+        # 浏览器端持久化组件（Gradio 6.x 用 storage_key，非 5.x 的 key）；刷新页面不丢失
+        user_id_state = gr.BrowserState(default_value="", storage_key="user_id")
 
         # 状态
         session_state = gr.State(value="")
@@ -103,8 +123,8 @@ def create_gradio_interface():
         # ============================================================
         # 核心响应函数
         # ============================================================
-        async def respond(message, chat_history, session_id):
-            """流式响应，AI 思考期间锁定输入"""
+        async def respond(message, chat_history, session_id, user_id):
+            """流式响应，AI 思考期间锁定输入。user_id 为当前登录用户标识（空串=未登录）"""
             # 空输入保护
             if not message or not message.strip():
                 yield message, chat_history, session_id, gr.update(interactive=True), gr.update(interactive=True)
@@ -122,7 +142,7 @@ def create_gradio_interface():
             lines = []              # 已定型展示行：[("thinking"/"tool"/"answer", text)]，多轮思考全部保留
             cur_stream = ""         # 当前 agent 轮正在流式的文本（角色待定）
             
-            async for partial_text, metadata in chat_api_stream(session_id, message):
+            async for partial_text, metadata in chat_api_stream(session_id, message, user_id):
                 if metadata and metadata.get("error"):
                     chat_history[assistant_idx]["content"] = f"❌ {partial_text}"
                     yield "", chat_history, session_id, gr.update(interactive=True), gr.update(interactive=True)
@@ -195,10 +215,59 @@ def create_gradio_interface():
             """重置会话：清空对话 + 新 session_id"""
             return [], _new_session_id(), gr.update(interactive=True), gr.update(interactive=True)
 
+        # ============================================================
+        # 用户标识登录：加载 / 登录 / 退出（单按钮两用）
+        # 状态文字/按钮始终可见（切 value/variant）；输入框登录后隐藏、退出后显示。
+        # 一律返回组件实例（非 gr.update），确保属性更新可靠。
+        # ============================================================
+        def _login_ui(user_id: str, error: str = ""):
+            """按登录态返回 [状态文字, 输入框, 操作按钮] 的更新。
+            登录后隐藏输入框（含其 label），只留状态文字 + 退出按钮；未登录反之。
+            error 非空时状态文字显示错误提示（代替 Toast，避免 Toast 遮挡按钮致点击失效）。"""
+            if user_id:
+                return (
+                    gr.Markdown(f"👤 当前用户：**{user_id}**"),
+                    gr.Textbox(visible=False),
+                    gr.Button("退出", variant="stop"),
+                )
+            status = f"⚠️ {error}" if error else "🔓 未登录（可选，用于保存对话记忆）"
+            return (
+                gr.Markdown(status),
+                gr.Textbox(value="", interactive=True, visible=True, placeholder="字母/数字/下划线/中文"),
+                gr.Button("登录", variant="primary"),
+            )
+
+        def on_user_load(saved_user_id):
+            """页面加载：从 BrowserState 恢复登录态显示（刷新不丢失）；仅刷新显示，不改 state。"""
+            return _login_ui(validate_user_id(saved_user_id or ""))
+
+        def on_user_action(raw_input, current_user_id):
+            """单按钮两用：未登录→登录；已登录→退出并重置会话。
+
+            返回 8 元组，按位置对应 _user_outputs：
+              [0]   user_id_state（BrowserState 新值）
+              [1:4] 登录态 UI —— _login_ui 产出的 [状态文字, 输入框, 操作按钮]
+              [4:8] 对话区 —— chat_reset（退出：清空+新 session+解锁）或 chat_keep（登录：全 skip 不动历史）
+            反馈一律走状态文字（不用 gr.Info/Warning），避免 Toast 遮挡按钮导致首次点击失效。"""
+            # 对话区 4 项（chatbot, session_state, msg, send_btn）的两种取值，具名替代裸元组拼接
+            chat_keep = (gr.skip(), gr.skip(), gr.skip(), gr.skip())   # 登录：保持不变，不误清历史
+            chat_reset = ([], _new_session_id(),                        # 退出：清空对话 + 新 session_id
+                          gr.update(interactive=True), gr.update(interactive=True))  # + 解锁输入/发送
+            current = validate_user_id(current_user_id or "")
+            if current:
+                # 已登录 → 退出：清登录态（user_id_state=""，UI 复位）+ 重置会话
+                return ("",) + _login_ui("") + chat_reset
+            # 未登录 → 登录：只更新登录态，对话区保持不变
+            uid = validate_user_id(raw_input)
+            if not uid:
+                login_ui = _login_ui("", error="用户标识无效：仅支持字母、数字、下划线、中文")
+                return ("",) + login_ui + chat_keep
+            return (uid,) + _login_ui(uid) + chat_keep
+
         def make_demo_handler(full_message):
             """生成演示按钮的处理函数"""
-            async def handler(chat_history, session_id):
-                async for item in respond(full_message, chat_history, session_id):
+            async def handler(chat_history, session_id, user_id):
+                async for item in respond(full_message, chat_history, session_id, user_id):
                     yield item
             return handler
 
@@ -208,6 +277,19 @@ def create_gradio_interface():
         
         # 页面加载时生成 session_id
         demo.load(_new_session_id, None, session_state)
+
+        # 页面加载时从浏览器 localStorage 恢复用户标识登录态显示（刷新不丢失）
+        demo.load(
+            on_user_load,
+            [user_id_state],
+            [user_status_md, user_id_input, user_action_btn],
+        )
+
+        # 单按钮两用（登录/退出）+ 输入框回车登录
+        # 退出时顺带重置会话，故 outputs 追加 [对话, session, 输入框, 发送按钮]（登录分支对这 4 项用 gr.skip 跳过）
+        _user_outputs = [user_id_state, user_status_md, user_id_input, user_action_btn, chatbot, session_state, msg, send_btn]
+        user_action_btn.click(on_user_action, [user_id_input, user_id_state], _user_outputs)
+        user_id_input.submit(on_user_action, [user_id_input, user_id_state], _user_outputs)
 
         # 注入 tooltip JavaScript 和 token 有效期显示
         tooltip_js = ""
@@ -251,15 +333,15 @@ def create_gradio_interface():
             }, 100);
         }"""
 
-        # 输入框提交
+        # 输入框提交（user_id_state 作为输入，把当前登录用户标识传给后端）
         msg.submit(
             respond, 
-            [msg, chatbot, session_state], 
+            [msg, chatbot, session_state, user_id_state], 
             [msg, chatbot, session_state, msg, send_btn]
         ).then(js=_autofocus_js)
         send_btn.click(
             respond,
-            [msg, chatbot, session_state],
+            [msg, chatbot, session_state, user_id_state],
             [msg, chatbot, session_state, msg, send_btn]
         ).then(js=_autofocus_js)
 
@@ -283,7 +365,7 @@ def create_gradio_interface():
         for btn, full_msg in all_demo_btns:
             btn.click(
                 make_demo_handler(full_msg),
-                [chatbot, session_state],
+                [chatbot, session_state, user_id_state],
                 [msg, chatbot, session_state, msg, send_btn]
             )
 

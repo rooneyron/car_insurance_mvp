@@ -111,11 +111,12 @@ def register_routes(application: FastAPI):
     class ChatRequest(BaseModel):
         session_id: str
         message: str
+        user_id: str = ""    # 极简登录用户标识（可选，空串=未登录）
 
     @application.post("/chat")
     async def chat(req: ChatRequest):
         """对话接口"""
-        result = chat_api(req.session_id, req.message)
+        result = chat_api(req.session_id, req.message, req.user_id)
         # 附加 RAG 管线调试信息
         result["debug"] = {
             "rag_query": get_last_rag_query(),

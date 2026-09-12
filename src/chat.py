@@ -11,6 +11,9 @@ import uuid
 import threading
 from src.route_types import Route
 from src.context import set_trace_id
+from src.auth import validate_user_id
+from src.memory import spawn_memory_extraction
+from src.memory.reader import load_user_memory
 from src.error_types import ErrorCode, USER_ERROR_MESSAGES, DEFAULT_ERROR_MESSAGE
 from src.constants import TRANSFER_SIGNAL, TOOL_TRANSFER_NAME, MAX_INPUT_LENGTH, GRAPH_RECURSION_LIMIT
 from src.token_usage import add_tokens, get_today_usage, is_budget_exceeded
@@ -145,10 +148,11 @@ def _invoke_graph(graph, input_data, config):
         return asyncio.run(graph.ainvoke(input_data, config=config))
 
 
-def chat_api(session_id: str, message: str) -> dict:
+def chat_api(session_id: str, message: str, user_id: str = "") -> dict:
     """
     核心对话接口
     调用 StateGraph 编排图，图内自动完成路由和 Agent 调度。
+    user_id：极简登录用户标识（空串=未登录），经校验后写入图 state，供各节点读取。
     """
     # 设置 trace_id（API 入口）
     trace_id = f"TR{int(time.time() * 1000)}{uuid.uuid4().hex[:4]}"
@@ -159,13 +163,14 @@ def chat_api(session_id: str, message: str) -> dict:
         return _error_response(ErrorCode.SESSION_BUSY)
 
     try:
-        return _chat_api_inner(session_id, message)
+        return _chat_api_inner(session_id, message, user_id)
     finally:
         _release_session_lock(session_id)
 
 
-def _chat_api_inner(session_id: str, message: str) -> dict:
+def _chat_api_inner(session_id: str, message: str, user_id: str = "") -> dict:
     """chat_api 内部实现（已持有 session 锁）"""
+    user_id = validate_user_id(user_id)  # 规范化用户标识（空串=未登录）
     if not message or not message.strip():
         return _error_response(ErrorCode.INPUT_EMPTY)
     if len(message) > MAX_INPUT_LENGTH:
@@ -179,12 +184,15 @@ def _chat_api_inner(session_id: str, message: str) -> dict:
 
     timing_handler = create_timing_handler()
     config = {
-        "configurable": {"thread_id": session_id},
+        "configurable": {"thread_id": session_id, "user_id": user_id},
         "recursion_limit": GRAPH_RECURSION_LIMIT,
         "callbacks": [timing_handler],
     }
 
     try:
+        # ---- 长期记忆读取（同步，agent 前）：组装掩码 prompt 文本，随 input_data 注入图 ----
+        user_memory = load_user_memory(user_id, message)
+
         timer.start("图执行")
         history_count = 0
         try:
@@ -201,7 +209,7 @@ def _chat_api_inner(session_id: str, message: str) -> dict:
 
         result = _invoke_graph(
             state.graph,
-            {"messages": [{"role": "user", "content": message}]},
+            {"messages": [{"role": "user", "content": message}], "user_id": user_id, "user_memory": user_memory},
             config=config
         )
         timer.stop("图执行")
@@ -238,6 +246,13 @@ def _chat_api_inner(session_id: str, message: str) -> dict:
         timer.stop("总耗时")
         _log_token_and_perf(session_id, route, input_tokens, output_tokens, cached_tokens, timer, timing_handler)
 
+        # ---- 回复已定稿：异步触发长期记忆提取（daemon 线程，不阻塞返回）----
+        try:
+            spawn_memory_extraction(user_id, message, reply)
+        except Exception as e:
+            # spawn 内部已全链路兜底、绝不抛出；此处仅防调用本身意外，记 debug 便于追溯
+            logger.debug("[记忆] spawn_memory_extraction 触发异常（已忽略）: %s", e)
+
         if transfer_flag:
             ticket_id = f"TK{int(time.time())}{session_id[-4:]}"
             clean_reply = reply.replace(TRANSFER_SIGNAL, "").strip()
@@ -270,11 +285,12 @@ def _chat_api_inner(session_id: str, message: str) -> dict:
         return _error_response(ErrorCode.UNKNOWN)
 
 
-async def chat_api_stream(session_id: str, message: str):
+async def chat_api_stream(session_id: str, message: str, user_id: str = ""):
     """
     流式对话接口（async generator）
     逐 token 产出回复文本，供 Gradio 实时展示。
     yield 的值为 (partial_text: str, metadata: dict | None)
+    user_id：极简登录用户标识（空串=未登录），经校验后写入图 state，供各节点读取。
     """
     # 设置 Trace_id（流式入口）
     trace_id = f"TR{int(time.time() * 1000)}{uuid.uuid4().hex[:4]}"
@@ -286,14 +302,16 @@ async def chat_api_stream(session_id: str, message: str):
         return
 
     try:
-        async for item in _chat_api_stream_inner(session_id, message):
+        async for item in _chat_api_stream_inner(session_id, message, user_id):
             yield item
     finally:
         _release_session_lock(session_id)
 
 
-async def _chat_api_stream_inner(session_id: str, message: str):
+async def _chat_api_stream_inner(session_id: str, message: str, user_id: str = ""):
     """chat_api_stream 内部实现（已持有 session 锁）"""
+    user_id = validate_user_id(user_id)  # 规范化用户标识（空串=未登录）
+    logger.info("[stream] user_id=%s", user_id or "(未登录)")
     # ---------- 输入校验 ----------
     if not message or not message.strip():
         yield _error_response(ErrorCode.INPUT_EMPTY).get("error_msg", ""), {"error": True}
@@ -312,7 +330,7 @@ async def _chat_api_stream_inner(session_id: str, message: str):
 
     timing_handler = create_timing_handler()
     config = {
-        "configurable": {"thread_id": session_id},
+        "configurable": {"thread_id": session_id, "user_id": user_id},
         "recursion_limit": GRAPH_RECURSION_LIMIT,
         "callbacks": [timing_handler],
     }
@@ -346,9 +364,12 @@ async def _chat_api_stream_inner(session_id: str, message: str):
         # 导入工具标签映射
         from src.chains.chains import TOOL_LABELS
 
+        # ---- 长期记忆读取（同步，agent 前）：组装掩码 prompt 文本，随 input_data 注入图 ----
+        user_memory = load_user_memory(user_id, message)
+
         try:
             async for event in state.graph.astream_events(
-                {"messages": [{"role": "user", "content": message}]},
+                {"messages": [{"role": "user", "content": message}], "user_id": user_id, "user_memory": user_memory},
                 config=config,
                 version="v2",
             ):
@@ -489,6 +510,14 @@ async def _chat_api_stream_inner(session_id: str, message: str):
             "agent_round": round_index,
             "role": "answer",
         }
+
+        # ---- 回复已定稿：异步触发长期记忆提取（daemon 线程，不阻塞流式返回）----
+        try:
+            spawn_memory_extraction(user_id, message, full_text or current_text)
+        except Exception as e:
+            # spawn 内部已全链路兜底、绝不抛出；此处仅防调用本身意外，记 debug 便于追溯
+            logger.debug("[记忆] spawn_memory_extraction 触发异常（已忽略）: %s", e)
+
         yield current_text, metadata
 
     except Exception as e:

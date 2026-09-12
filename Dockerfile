@@ -5,7 +5,7 @@ WORKDIR /app
 RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 COPY requirements.txt .
-RUN pip install --progress=on --timeout 1200 -r requirements.txt
+RUN pip install --no-cache-dir  --progress=on --timeout 1200 -r requirements.txt
 
 
 COPY . .

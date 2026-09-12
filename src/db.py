@@ -18,6 +18,9 @@ import psycopg2
 from dotenv import load_dotenv
 
 from src.constants import EMBEDDING_DIM
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 load_dotenv()
 
@@ -62,6 +65,24 @@ def init_db():
             ON documents USING bm25 (id, content_tokens)
             WITH (key_field='id', text_fields='{"content_tokens":{"tokenizer":{"type":"whitespace"}}}')
         """,
+        # ---------- 长期记忆：语义记忆表（用户持久事实，pgvector 余弦检索） ----------
+        f"""
+        CREATE TABLE IF NOT EXISTS semantic_memory (
+            id         BIGSERIAL PRIMARY KEY,
+            user_id    TEXT NOT NULL,
+            content    TEXT NOT NULL,
+            embedding  vector({EMBEDDING_DIM}),
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS semantic_memory_embedding_idx
+            ON semantic_memory USING hnsw (embedding vector_cosine_ops)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS semantic_memory_user_id_idx
+            ON semantic_memory (user_id)
+        """,
     ]
     conn = get_conn()
     try:
@@ -69,7 +90,7 @@ def init_db():
             with conn.cursor() as cur:
                 for stmt in ddl:
                     cur.execute(stmt)
-        print("[db] init_db 完成：documents 表 + HNSW(vector_cosine_ops) + BM25(whitespace) 索引就绪")
+        logger.info("[db] init_db 完成：documents + semantic_memory 表 + HNSW(vector_cosine_ops) + BM25(whitespace) 索引就绪")
     finally:
         conn.close()
 

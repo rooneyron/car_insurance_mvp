@@ -56,6 +56,18 @@ if __name__ == "__main__":
     except Exception as e:
         logger.warning("LLM API 预热失败（不影响服务）: %s", e)
 
+    # ---------- 长期记忆：建 PG 语义表 + 实例化 sqlite 结构化存储 ----------
+    try:
+        from src.db import init_db
+        init_db()                       # 幂等：建 documents/semantic_memory 表 + 索引
+    except Exception as e:
+        logger.warning("init_db 失败（不影响服务启动）: %s", e)
+    try:
+        from src.memory import structured_store  # noqa: F401  触发 sqlite 建表
+        logger.info("长期记忆存储就绪")
+    except Exception as e:
+        logger.warning("记忆存储初始化失败（不影响服务）: %s", e)
+
     # ---------- 组装应用 ----------
     app = create_app()
     demo = create_gradio_interface()
