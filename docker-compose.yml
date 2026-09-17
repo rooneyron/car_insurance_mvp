@@ -12,15 +12,19 @@ services:
       - ./:/app
       # HF 缓存：宿主机 HF_HOME=D:\caches\huggingface（bge-reranker-base 模型在此），挂到容器
       # HF 默认缓存位置，rerank 的 local_files_only=True 才能离线读到模型（原 C:\Users\HH\.cache 路径无模型）。
+      # 阿里云部署时若模型已打进镜像或走 API rerank，可注释掉此行。
       - D:\caches\huggingface:/root/.cache/huggingface
     ports:
       - "8000:8000"
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=postgresql://insurance_user:insurance_pwd123@db:5432/insurance_db
-      - USE_LOCAL_RERANK=true          # 覆盖 Dockerfile 的 false：本地走 GPU CrossEncoder 重排
+      # 本地 Docker Desktop 有 GPU → true 走本地 CrossEncoder 重排（GPU 约 0.11s/20 条）
+      # 阿里云无 GPU → false 走 DashScope qwen3-rerank API（不装 torch，省运行时开销）
+      - USE_LOCAL_RERANK=true
     # GPU 透传：把宿主机 NVIDIA GPU 分配给容器，否则容器内 torch.cuda.is_available()=False。
     # 前提：Docker Desktop 用 WSL2 后端 + Windows NVIDIA 驱动（本机 591.86 已满足）。
+    # 阿里云部署若无 GPU，注释掉整个 deploy 块，改用 requirements-prod.txt + USE_LOCAL_RERANK=false。
     deploy:
       resources:
         reservations:

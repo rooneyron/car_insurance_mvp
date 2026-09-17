@@ -1,16 +1,20 @@
 FROM python:3.11-slim
 WORKDIR /app
 
+# 构建参数：默认 requirements.txt（本地/阿里云有 GPU），生产传 requirements-prod.txt（无 GPU，镜像更小）
+ARG REQ_FILE=requirements.txt
+
 # libgomp1：CUDA 版 torch 的 OpenMP 运行库依赖，python:slim 默认不含，缺失会导致 import torch 失败
+# requirements-prod.txt 不含 torch，但装 libgomp1 无害（~2MB），保持 Dockerfile 统一
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# 清华pip加速，国内必加，否则下载很慢
+# 清华 pip 加速，国内必加，否则下载很慢
 # torch==2.11.0+cu128 由 requirements.txt 内 --extra-index-url（上海交大 pytorch 镜像）提供
 RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir  --progress=on --timeout 1200 -r requirements.txt
+COPY ${REQ_FILE} .
+RUN pip install --no-cache-dir --progress=on --timeout 1200 -r ${REQ_FILE}
 
 
 COPY . .
