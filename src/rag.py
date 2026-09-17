@@ -230,10 +230,12 @@ def init_rag():
 
     if _reranker is None:
         logger.info("正在加载本地 Rerank 模型 (BAAI/bge-reranker-base)，约 1.1GB...")
+        import torch
         from sentence_transformers import CrossEncoder
         model_path = _resolve_hf_cached_path(RERANK_MODEL) or RERANK_MODEL
-        _reranker = CrossEncoder(model_path, max_length=RERANK_MAX_LENGTH, local_files_only=True)
-        logger.info("Rerank 模型加载完成 (path=%s)", model_path)
+        _device = "cuda" if torch.cuda.is_available() else "cpu"   # GPU 优先，不可用则回退 CPU
+        _reranker = CrossEncoder(model_path, max_length=RERANK_MAX_LENGTH, local_files_only=True, device=_device)
+        logger.info("Rerank 模型加载完成 (path=%s, device=%s)", model_path, _device)
 
 
 def init_rag_components():
@@ -252,17 +254,23 @@ def init_rag_components():
     # 生产模式不加载本地 Rerank，也不 import torch（requirements-prod 部署环境无 torch，
     # 无条件 import 会让整个预加载 abort、只剩一条 warning）；仅本地精排模式设置推理线程。
     use_local_rerank = os.environ.get("USE_LOCAL_RERANK", "true").lower() == "true"
+    _rerank_device = "cpu"   # 默认 CPU；下方检测到 cuda 可用则切 GPU
     if use_local_rerank:
-        # torch CPU 推理线程数：实测本机 8 线程最优（默认仅 6 偏保守，>8 因超线程争抢反而慢）。
-        # 只改并行度、不改模型/候选/检索逻辑，精排分数完全一致=零质量损失。可用 RERANK_NUM_THREADS 覆盖。
         import torch
-        try:
-            _n_threads = int(os.environ.get("RERANK_NUM_THREADS", "8"))
-        except ValueError:
-            logger.warning("RERANK_NUM_THREADS=%r 非法，回退为默认 8", os.environ.get("RERANK_NUM_THREADS"))
-            _n_threads = 8
-        torch.set_num_threads(_n_threads)
-        logger.info("[RAG-启动] torch推理线程数设为: %d（实测8最优）", _n_threads)
+        # GPU 优先：cuda 可用则 rerank 走 GPU（20 条约 0.1s），否则回退 CPU（约 2-3s，需调线程数）。
+        _rerank_device = "cuda" if torch.cuda.is_available() else "cpu"
+        if _rerank_device == "cuda":
+            logger.info("[RAG-启动] rerank 推理设备: GPU (%s)", torch.cuda.get_device_name(0))
+        else:
+            # 仅 CPU 推理需调线程数：实测本机 8 线程最优（默认仅 6 偏保守，>8 因超线程争抢反而慢）。
+            # 只改并行度、不改模型/候选/检索逻辑，精排分数完全一致=零质量损失。可用 RERANK_NUM_THREADS 覆盖。
+            try:
+                _n_threads = int(os.environ.get("RERANK_NUM_THREADS", "8"))
+            except ValueError:
+                logger.warning("RERANK_NUM_THREADS=%r 非法，回退为默认 8", os.environ.get("RERANK_NUM_THREADS"))
+                _n_threads = 8
+            torch.set_num_threads(_n_threads)
+            logger.info("[RAG-启动] rerank 推理设备: CPU，线程数=%d", _n_threads)
 
     # ① jieba 分词器（预热词典 + BM25 自定义术语，避免首请求 Building prefix dict）
     t = time.time()
@@ -288,8 +296,8 @@ def init_rag_components():
         if _reranker is None:
             from sentence_transformers import CrossEncoder
             model_path = _resolve_hf_cached_path(RERANK_MODEL) or RERANK_MODEL
-            _reranker = CrossEncoder(model_path, max_length=RERANK_MAX_LENGTH, local_files_only=True)
-        logger.info("[RAG-启动] CrossEncoder模型加载: %.3fs", time.time() - t)
+            _reranker = CrossEncoder(model_path, max_length=RERANK_MAX_LENGTH, local_files_only=True, device=_rerank_device)
+        logger.info("[RAG-启动] CrossEncoder模型加载: %.3fs (device=%s)", time.time() - t, _rerank_device)
     else:
         logger.info("[RAG-启动] 生产模式：跳过本地 CrossEncoder（精排走 qwen3-rerank API）")
 

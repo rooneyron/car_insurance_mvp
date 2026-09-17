@@ -431,7 +431,7 @@ def _make_router_node(llm_classifier, llm_reviewer):
 
 
 def _make_agent_node(llm):
-    """Agent 节点（决策 + 回复）：流式调用 LLM 决定是否调用工具；不调工具时其 content 即最终回复。
+    """Agent 节点（决策 + 回复）：按 config 的 stream 开关流式/非流式调用 LLM 决定是否调用工具；不调工具时其 content 即最终回复。
 
     agent 直接对前端负责：调工具轮 content 为空、累积重建 tool_calls 供路由；
     直接回复轮 content 即成品回复，流式推给前端并写入 reply 字段（供非流式 chat_api 取用）。
@@ -458,15 +458,23 @@ def _make_agent_node(llm):
         is_first_round = not any(isinstance(m, ToolMessage) for m in messages)
         round_label = "第1轮/调工具轮" if is_first_round else "第2轮/直接回复轮"
 
+        # 流式开关：由入口经 config configurable 透传（API 的 stream 字段 / Gradio 流式路径），
+        # 默认 True 保持流式行为（兼容未传该字段的调用方）。
+        stream_mode = config.get("configurable", {}).get("stream", True)
         try:
             llm_runner = llm.bind_tools(tools) if tools else llm
             result = None
             chunk_count = 0
-            async for chunk in llm_runner.astream(full_messages):
-                chunk_count += 1
-                result = chunk if result is None else result + chunk
-            if result is None:
-                result = AIMessage(content="")  # 极端兜底：流未产生任何 chunk，避免后续 NoneType 崩溃
+            if stream_mode:
+                async for chunk in llm_runner.astream(full_messages):
+                    chunk_count += 1
+                    result = chunk if result is None else result + chunk
+                if result is None:
+                    result = AIMessage(content="")  # 极端兜底：流未产生任何 chunk，避免后续 NoneType 崩溃
+            else:
+                # 非流式：一次性取完整结果（API 非流式链路），不走 chunk 累积
+                result = await llm_runner.ainvoke(full_messages)
+                chunk_count = 1
         except Exception:
             # 打印完整异常链（含底层连接错误，如 RemoteProtocolError），用于诊断偶发请求失败；不吞异常
             logger.exception("[Agent] LLM 调用失败 (agent=%s)", agent_type)

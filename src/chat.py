@@ -148,11 +148,13 @@ def _invoke_graph(graph, input_data, config):
         return asyncio.run(graph.ainvoke(input_data, config=config))
 
 
-def chat_api(session_id: str, message: str, user_id: str = "") -> dict:
+def chat_api(session_id: str, message: str, user_id: str = "", stream: bool = False) -> dict:
     """
-    核心对话接口
+    核心对话接口（一次性返回完整结果）
     调用 StateGraph 编排图，图内自动完成路由和 Agent 调度。
     user_id：极简登录用户标识（空串=未登录），经校验后写入图 state，供各节点读取。
+    stream：经 config 透传至 agent 节点，控制 LLM 调用方式（False=ainvoke 一次性 / True=astream）；
+    本接口返回值恒为完整 JSON，与 stream 无关。
     """
     # 设置 trace_id（API 入口）
     trace_id = f"TR{int(time.time() * 1000)}{uuid.uuid4().hex[:4]}"
@@ -163,12 +165,12 @@ def chat_api(session_id: str, message: str, user_id: str = "") -> dict:
         return _error_response(ErrorCode.SESSION_BUSY)
 
     try:
-        return _chat_api_inner(session_id, message, user_id)
+        return _chat_api_inner(session_id, message, user_id, stream=stream)
     finally:
         _release_session_lock(session_id)
 
 
-def _chat_api_inner(session_id: str, message: str, user_id: str = "") -> dict:
+def _chat_api_inner(session_id: str, message: str, user_id: str = "", stream: bool = False) -> dict:
     """chat_api 内部实现（已持有 session 锁）"""
     user_id = validate_user_id(user_id)  # 规范化用户标识（空串=未登录）
     if not message or not message.strip():
@@ -184,7 +186,8 @@ def _chat_api_inner(session_id: str, message: str, user_id: str = "") -> dict:
 
     timing_handler = create_timing_handler()
     config = {
-        "configurable": {"thread_id": session_id, "user_id": user_id},
+        # stream 透传至 agent 节点：控制 LLM 用 ainvoke（非流式）还是 astream（流式）
+        "configurable": {"thread_id": session_id, "user_id": user_id, "stream": stream},
         "recursion_limit": GRAPH_RECURSION_LIMIT,
         "callbacks": [timing_handler],
     }
@@ -330,7 +333,8 @@ async def _chat_api_stream_inner(session_id: str, message: str, user_id: str = "
 
     timing_handler = create_timing_handler()
     config = {
-        "configurable": {"thread_id": session_id, "user_id": user_id},
+        # Gradio/SSE 流式路径恒流式：agent 节点用 astream 产生 on_chat_model_stream 事件
+        "configurable": {"thread_id": session_id, "user_id": user_id, "stream": True},
         "recursion_limit": GRAPH_RECURSION_LIMIT,
         "callbacks": [timing_handler],
     }

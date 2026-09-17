@@ -19,4 +19,5 @@ PyYAML                  # router L0/L1 加载 config.yaml
 httpx                   # chains.py LLM 连接池 / 连接诊断
 requests                # rag.py DashScope qwen3-rerank 精排
 psycopg2-binary>=2.9    # ParadeDB(pgvector + pg_search) 连接 · src/db.py
+lark-oapi               # 飞书机器人 · app.py 后台线程 in-process 直连 chat_api（长连接收发消息）
 # 注意：没有 sentence-transformers / torch，生产环境不会加载本地 Rerank

@@ -4,14 +4,15 @@ FastAPI 应用工厂
 """
 
 import os
+import json
 import time
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import jwt
 from pydantic import BaseModel
 from src.constants import APP_VERSION, SERVICE_NAME, JWT_ALGORITHM, PUBLIC_PATHS
 from src.token_usage import get_today_usage, DAILY_TOKEN_LIMIT
-from src.chat import chat_api
+from src.chat import chat_api, chat_api_stream
 from src.rag import get_last_rag_pipeline_stats, get_last_rag_query
 from src.logger import get_logger
 
@@ -112,11 +113,29 @@ def register_routes(application: FastAPI):
         session_id: str
         message: str
         user_id: str = ""    # 极简登录用户标识（可选，空串=未登录）
+        stream: bool = False  # 是否流式返回：false=一次性完整 JSON（默认，agent 节点走 ainvoke）；
+                              # true=SSE 流式（agent 节点走 astream，复用 Gradio 流式链路）
 
     @application.post("/chat")
     async def chat(req: ChatRequest):
-        """对话接口"""
-        result = chat_api(req.session_id, req.message, req.user_id)
+        """对话接口：stream=false 一次性返回完整 JSON；stream=true 返回 SSE 流。"""
+        if req.stream:
+            async def sse_generator():
+                """把 chat_api_stream 的 (partial_text, metadata) 包装成 SSE 事件。"""
+                async for partial_text, metadata in chat_api_stream(req.session_id, req.message, req.user_id):
+                    payload = {"content": partial_text}
+                    if metadata:
+                        payload.update(metadata)
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                sse_generator(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        result = chat_api(req.session_id, req.message, req.user_id, stream=req.stream)
         # 附加 RAG 管线调试信息
         result["debug"] = {
             "rag_query": get_last_rag_query(),

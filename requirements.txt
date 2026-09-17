@@ -14,7 +14,12 @@ PyJWT
 langmem
 langchain-text-splitters
 sentence-transformers   # 本地开发需要 Rerank
-torch                   # rag.py 本地 Rerank 推理直接 import（sentence-transformers 亦传递依赖）
+# torch 锁 CUDA 12.8 构建版（+cu128）：Windows/Docker 直接 `pip install torch` 装的是 CPU 版，
+# torch.cuda.is_available() 恒 False，本地 rerank 只能 CPU（20 条约 2s）。+cu128 版自带 NVIDIA
+# CUDA 运行库（无需单独装 CUDA Toolkit），GPU 重排 20 条约 0.1s。该精确版本仅 PyTorch 专用源有，
+# 故加 --extra-index-url 指向上海交大镜像（国内快；官方源 https://download.pytorch.org/whl/cu128）。
+--extra-index-url https://mirror.sjtu.edu.cn/pytorch-wheels/cu128
+torch==2.11.0+cu128                   # rag.py 本地 Rerank 推理直接 import（sentence-transformers 亦传递依赖）
 jieba                   # RAG 查询/入库中文分词（喂给 pg_search BM25）
 rank-bm25               # 保留 · 预留熔断降级（当前 BM25 由 pg_search 执行）
 PyYAML                  # router L0/L1 加载 config.yaml
@@ -26,3 +31,6 @@ PyMuPDF                 # scripts/pdf_to_text.py 离线 PDF 转文本
 
 # ParadeDB(pgvector + pg_search) 连接 · src/db.py + tools/ingest_to_pg.py
 psycopg2-binary>=2.9
+
+# 飞书机器人 · feishu_bot.py（app.py 后台线程 in-process 直连 chat_api）+ feishu_ws_echo.py（纯 echo 链路诊断脚本）
+lark-oapi               # 飞书官方 SDK：长连接(WebSocket)接收消息事件 + 发消息 API
