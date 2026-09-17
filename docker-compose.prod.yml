@@ -23,6 +23,7 @@ services:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=postgresql://insurance_user:insurance_pwd123@db:5432/insurance_db
       - USE_LOCAL_RERANK=false
+      - HF_HUB_DISABLE_XET=1
     depends_on:
       db:
         condition: service_healthy
