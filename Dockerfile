@@ -6,7 +6,8 @@ ARG REQ_FILE=requirements.txt
 
 # libgomp1：CUDA 版 torch 的 OpenMP 运行库依赖，python:slim 默认不含，缺失会导致 import torch 失败
 # requirements-prod.txt 不含 torch，但装 libgomp1 无害（~2MB），保持 Dockerfile 统一
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+# ffmpeg：飞书语音 opus 转 wav（ASR 模块需要）
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # 清华 pip 加速，国内必加，否则下载很慢
