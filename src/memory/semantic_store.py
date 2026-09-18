@@ -125,6 +125,26 @@ class PgSemanticStore:
         finally:
             conn.close()
 
+    def list_by_user(self, user_id: str, limit: int = 50) -> List[Dict]:
+        """列出该用户所有语义记忆（按创建时间降序），返回 [{id, content, created_at}, ...]。"""
+        if not user_id:
+            return []
+        sql = (
+            "SELECT id, content, created_at FROM semantic_memory "
+            "WHERE user_id = %s ORDER BY created_at DESC LIMIT %s"
+        )
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, (user_id, limit))
+                rows = cur.fetchall()
+            return [{"id": rid, "content": content, "created_at": str(ts)} for rid, content, ts in rows]
+        except psycopg2.Error as e:
+            logger.error("[记忆-语义] list_by_user 失败 user_id=%s: %s", user_id, e)
+            return []
+        finally:
+            conn.close()
+
     def delete_oldest(self, user_id: str, limit: int) -> None:
         """删除该用户最旧的 limit 条（按 created_at 升序）。"""
         if not user_id or limit <= 0:

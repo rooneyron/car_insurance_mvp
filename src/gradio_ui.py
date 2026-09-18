@@ -15,25 +15,31 @@ logger = get_logger(__name__)
 
 
 # ============================================================
-# 演示话术定义（三栏布局：左-路由与记忆 / 中-RAG与兜底 / 右-边界防护）
+# 演示话术定义（三栏布局：左-工具调用 / 中-记忆测试 / 右-前端输入）
 # 格式：每栏 list of rows，每行 list of (按钮文字, 完整话术)
 #       同行多按钮用 → 文字表示连续操作
 # ============================================================
-ROUTE_MEMORY = [
-    [("你好", "你好")],
-    [("我叫张三", "我叫张三，身份证 110101199001011234"), ("→ 叫什么名", "我叫什么名字")],
-    [("帮我算保费", "帮我算一下特斯拉的保费"), ("→ 37岁特斯拉Y", "37岁，特斯拉Y，驾龄5年")],
-    [("我改变主意，查保单", "我改变主意了，不计算保费了，帮我查一下保单，保单号 POL20260001")],
+TOOL_CALLS = [
+    [("帮我算保费", "帮我算一下特斯拉的保费"), ("→ 37岁驾龄5年", "37岁，驾龄5年")],
+    [("查保单", "帮我查保单，保单号 POL20260001")],
+    [("条款检索", "车损险保障哪些情况？")],
+    [("转人工", "我要投诉，转人工")],
 ]
 
-RAG_FALLBACK = [
-    [("车损险保障哪些？", "车损险保障哪些情况？")],
-    [("太空飞船赔不赔？", "太空飞船的保险赔不赔？")],
-    [("我要投诉，转人工", "我要投诉，转人工")],
+MEMORY_TEST = [
+    # 短期记忆（同一 session_id，对话历史 MemorySaver）
+    [("告诉身份", "我叫张三，身份证 110101199001011234")],
+    [("→ 我叫什么", "我叫什么名字？")],
+    [("告诉车辆", "我的车去年出险了")],
+    # ⚠️ 此处应点「清空对话」按钮，再点下方按钮验证长期记忆
+    [("→ 我叫什么(结构化)", "我叫什么名字？")],
+    [("→ 我的车(语义)", "我出过险吗？")],
 ]
 
-BOUNDARY = [
-    [("测×1001", "测" * 1001)],
+FRONTEND_INPUT = [
+    [("超长输入", "测" * 1001)],
+    [("无关问题", "太空飞船的保险赔不赔？")],
+    [("模糊意图", "你帮我看看")],
 ]
 
 
@@ -90,34 +96,35 @@ def create_gradio_interface():
         all_demo_btns = []  # 收集所有按钮用于事件绑定
 
         with gr.Row():
-            # 左栏：路由与记忆
+            # 左栏：工具调用
             with gr.Column(scale=1):
-                gr.Markdown("**路由与记忆**")
-                for ri, row in enumerate(ROUTE_MEMORY):
+                gr.Markdown("**🔧 工具调用**")
+                for ri, row in enumerate(TOOL_CALLS):
                     with gr.Row():
                         for ci, (label, full_msg) in enumerate(row):
                             btn = gr.Button(label, size="sm", variant="secondary",
-                                          elem_id=f"demo_rm_{ri}_{ci}")
+                                          elem_id=f"demo_tc_{ri}_{ci}")
                             all_demo_btns.append((btn, full_msg))
 
-            # 中栏：RAG与兜底
+            # 中栏：记忆测试（需先登录）
             with gr.Column(scale=1):
-                gr.Markdown("**RAG与兜底**")
-                for ri, row in enumerate(RAG_FALLBACK):
+                gr.Markdown("**🧠 记忆测试**（需先登录）")
+                for ri, row in enumerate(MEMORY_TEST):
                     with gr.Row():
                         for ci, (label, full_msg) in enumerate(row):
                             btn = gr.Button(label, size="sm", variant="secondary",
-                                          elem_id=f"demo_rf_{ri}_{ci}")
+                                          elem_id=f"demo_mt_{ri}_{ci}")
                             all_demo_btns.append((btn, full_msg))
+                gr.Markdown("<small>⚠️ 第3步后点「清空对话」再点4/5</small>", visible=True)
 
-            # 右栏：边界防护
+            # 右栏：前端输入
             with gr.Column(scale=1):
-                gr.Markdown("**边界防护**")
-                for ri, row in enumerate(BOUNDARY):
+                gr.Markdown("**🛡️ 前端输入**")
+                for ri, row in enumerate(FRONTEND_INPUT):
                     with gr.Row():
                         for ci, (label, full_msg) in enumerate(row):
                             btn = gr.Button(label, size="sm", variant="secondary",
-                                          elem_id=f"demo_bd_{ri}_{ci}")
+                                          elem_id=f"demo_fi_{ri}_{ci}")
                             all_demo_btns.append((btn, full_msg))
 
         # ============================================================
