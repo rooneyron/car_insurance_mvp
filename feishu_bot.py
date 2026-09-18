@@ -32,6 +32,7 @@ import os
 import sys
 import json
 import time
+import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -58,8 +59,8 @@ from src.logger import get_logger
 logger = get_logger(__name__)
 
 # 直连核心：与 Gradio(src/gradio_ui.py) 同款，import 核心对话函数。
-# chat_api 是非流式入口，返回完整 dict：{success, content:{reply,transfer,ticket_id?}, route, elapsed_ms}
-from src.chat import chat_api
+# chat_api_async 是异步版入口，避免每次 asyncio.run 创建/销毁事件循环导致 httpx 连接池报错
+from src.chat import chat_api_async
 
 # 消息去重（sqlite 持久化）：只读判重 + 回复成功后登记，防飞书重投/重连补推导致重复回复
 from src.memory.dedup_store import is_duplicate_message, mark_message_processed
@@ -76,9 +77,51 @@ MAX_INPUT_LEN = 1000
 _api_client = None
 
 # 业务处理线程池：让事件 handler 快速返回（SDK 及时回写 ack，避免飞书因 ack 超时重投事件），
-# 把耗时的 chat_api(LLM 多轮)+reply 交给线程池异步跑。max_workers 支持多会话并发；
+# 把耗时的 chat_api_async(LLM 多轮)+reply 交给线程池异步跑。max_workers 支持多会话并发；
 # 同一会话(chat_id)的串行由 chat_api 内部 session 锁保证，故此处并发安全。
 _executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="feishu-worker")
+
+# ============================================================
+# 飞书长期事件循环管理（解决 asyncio.run 创建/销毁循环导致 httpx 连接池报错）
+# ============================================================
+_feishu_loop: asyncio.AbstractEventLoop | None = None
+_feishu_loop_thread: threading.Thread | None = None
+
+
+def start_feishu_loop():
+    """创建并启动飞书专用事件循环（在 daemon 线程里 run_forever）。
+    
+    必须在 start_in_background() 之前调用。所有飞书消息的 chat_api_async 调用
+    都通过 run_coroutine_threadsafe 提交到这个循环，避免每次 asyncio.run 创建/销毁
+    事件循环导致全局 httpx 连接池绑定错误。
+    """
+    global _feishu_loop, _feishu_loop_thread
+    
+    if _feishu_loop is not None:
+        logger.warning("[飞书循环] 已启动，跳过")
+        return
+    
+    _feishu_loop = asyncio.new_event_loop()
+    
+    def _run_loop():
+        asyncio.set_event_loop(_feishu_loop)
+        logger.info("[飞书循环] 事件循环已启动")
+        _feishu_loop.run_forever()
+    
+    _feishu_loop_thread = threading.Thread(
+        target=_run_loop,
+        name="feishu-event-loop",
+        daemon=True
+    )
+    _feishu_loop_thread.start()
+    logger.info("[飞书循环] daemon 线程已启动")
+
+
+def get_feishu_loop() -> asyncio.AbstractEventLoop:
+    """获取飞书事件循环（必须先调用 start_feishu_loop）"""
+    if _feishu_loop is None:
+        raise RuntimeError("飞书事件循环未启动，请先调用 start_feishu_loop()")
+    return _feishu_loop
 
 
 # ============================================================
@@ -205,7 +248,9 @@ def _process_audio_message(message_id: str, session_id: str, user_id: str, file_
         logger.warning("[语音] 发送占位消息失败: %s", e)
     
     # 2. 下载音频
+    t_download_start = time.time()
     audio_data = _download_feishu_audio(message_id, file_key)
+    download_elapsed = time.time() - t_download_start
     if not audio_data:
         logger.error("[语音] 音频下载失败")
         try:
@@ -214,12 +259,13 @@ def _process_audio_message(message_id: str, session_id: str, user_id: str, file_
         except Exception:
             pass
         return
+    logger.info("[语音] 下载完成: size=%d bytes, elapsed=%.1fs", len(audio_data), download_elapsed)
     
     # 3. ASR 识别
     # 飞书语音格式是 opus，先尝试直接传，失败会自动 fallback 转 wav
+    t_asr_start = time.time()
     recognized_text = speech_to_text(audio_data, file_ext="opus")
-    
-    asr_elapsed = time.time() - start_time
+    asr_elapsed = time.time() - t_asr_start
     logger.info("[语音] ASR 完成: text='%s', elapsed=%.1fs", 
                 recognized_text[:50] if recognized_text else "(空)", asr_elapsed)
     
@@ -234,15 +280,23 @@ def _process_audio_message(message_id: str, session_id: str, user_id: str, file_
         return
     
     # 5. 识别成功，走 chat 流程（和文本消息一样）
+    t_chat_start = time.time()
     try:
-        result = chat_api(session_id, recognized_text, user_id, stream=False)
+        # 通过 run_coroutine_threadsafe 提交到飞书事件循环，避免 asyncio.run 创建/销毁循环
+        future = asyncio.run_coroutine_threadsafe(
+            chat_api_async(session_id, recognized_text, user_id, stream=False),
+            get_feishu_loop()
+        )
+        result = future.result(timeout=60)  # 60秒超时
     except Exception as e:
-        logger.error("[语音] chat_api 异常: %s", e)
+        logger.error("[语音] chat_api_async 异常: %s", e)
         try:
             _reply_card(message_id, _build_card("服务开小差了，请稍后再试。"))
         except Exception:
             pass
         return
+    chat_elapsed = time.time() - t_chat_start
+    logger.info("[语音] chat_api 完成: route=%s, elapsed=%.1fs", result.get('route'), chat_elapsed)
     
     # 6. 解析响应并回复
     if result.get("success") == 0:
@@ -261,8 +315,8 @@ def _process_audio_message(message_id: str, session_id: str, user_id: str, file_
         try:
             _reply_card(message_id, _build_card(full_reply, transfer, ticket_id))
             mark_message_processed(message_id)
-            logger.info("[语音] 回复成功: message_id=%s, total_elapsed=%.1fs", 
-                        message_id, time.time() - start_time)
+            logger.info("[语音] 回复成功: message_id=%s, download=%.1fs, asr=%.1fs, chat=%.1fs, total=%.1fs", 
+                        message_id, download_elapsed, asr_elapsed, chat_elapsed, time.time() - start_time)
         except Exception as e:
             logger.error("[语音] 回复失败: %s", e)
     else:
@@ -351,11 +405,16 @@ def _process_and_reply(message_id: str, text: str, session_id: str, user_id: str
 
         # ---- 直连核心（in-process），非流式一次性拿完整回复 ----
         try:
-            result = chat_api(session_id, text, user_id, stream=False)
+            # 通过 run_coroutine_threadsafe 提交到飞书事件循环，避免 asyncio.run 创建/销毁循环
+            future = asyncio.run_coroutine_threadsafe(
+                chat_api_async(session_id, text, user_id, stream=False),
+                get_feishu_loop()
+            )
+            result = future.result(timeout=60)  # 60秒超时
         except Exception as e:
-            print(f"[chat_api异常] {type(e).__name__}: {e}")
+            print(f"[chat_api_async异常] {type(e).__name__}: {e}")
             _reply_card(message_id, _build_card("服务开小差了，请稍后再试。"))
-            # chat_api 异常（多为偶发 LLM 超时）：不登记，飞书重投/重连可重试
+            # chat_api_async 异常（多为偶发 LLM 超时）：不登记，飞书重投/重连可重试
             return
 
         # ---- 解析响应 ----

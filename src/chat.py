@@ -288,6 +288,140 @@ def _chat_api_inner(session_id: str, message: str, user_id: str = "", stream: bo
         return _error_response(ErrorCode.UNKNOWN)
 
 
+async def chat_api_async(session_id: str, message: str, user_id: str = "", stream: bool = False) -> dict:
+    """
+    异步版核心对话接口（供飞书后台线程调用，避免 asyncio.run 创建/销毁事件循环）
+    与 chat_api 功能相同，但不使用 asyncio.run()，直接在已有事件循环中运行。
+    """
+    # 设置 trace_id
+    trace_id = f"TR{int(time.time() * 1000)}{uuid.uuid4().hex[:4]}"
+    set_trace_id(trace_id)
+
+    # ---------- Session 并发锁 ----------
+    if not _try_acquire_session_lock(session_id):
+        return _error_response(ErrorCode.SESSION_BUSY)
+
+    try:
+        return await _chat_api_inner_async(session_id, message, user_id, stream=stream)
+    finally:
+        _release_session_lock(session_id)
+
+
+async def _chat_api_inner_async(session_id: str, message: str, user_id: str = "", stream: bool = False) -> dict:
+    """chat_api_async 内部实现（已持有 session 锁）"""
+    user_id = validate_user_id(user_id)
+    if not message or not message.strip():
+        return _error_response(ErrorCode.INPUT_EMPTY)
+    if len(message) > MAX_INPUT_LENGTH:
+        return _error_response(ErrorCode.INPUT_TOO_LONG)
+    if is_budget_exceeded():
+        return _error_response(ErrorCode.BUDGET_EXCEEDED)
+
+    timer = Timer()
+    timer.start("总耗时")
+    logger.debug("收到消息(async): %s...", message[:30])
+
+    timing_handler = create_timing_handler()
+    config = {
+        "configurable": {"thread_id": session_id, "user_id": user_id, "stream": stream},
+        "recursion_limit": GRAPH_RECURSION_LIMIT,
+        "callbacks": [timing_handler],
+    }
+
+    try:
+        # ---- 长期记忆读取 ----
+        user_memory = load_user_memory(user_id, message)
+
+        timer.start("图执行")
+        history_count = 0
+        try:
+            prev_state = state.graph.get_state(config).values
+            messages = list(prev_state.get("messages", []))
+            if messages and state.summarize_fn:
+                summarized = state.summarize_fn({"messages": messages})
+                state.graph.update_state(config, summarized)
+                history_count = len(summarized.get("messages", []))
+            else:
+                history_count = len(messages)
+        except Exception:
+            pass
+
+        # 直接 await 图调用，不使用 asyncio.run()
+        result = await state.graph.ainvoke(
+            {"messages": [{"role": "user", "content": message}], "user_id": user_id, "user_memory": user_memory},
+            config=config
+        )
+        timer.stop("图执行")
+
+        route_str = result.get("route", Route.GENERAL.value)
+        try:
+            route = Route(route_str)
+        except ValueError:
+            route = Route.GENERAL
+
+        # ---- 回复文本 ----
+        reply = result.get("reply", "")
+        direct_response = result.get("direct_response")
+        if direct_response and isinstance(direct_response, str):
+            if direct_response.startswith("{"):
+                try:
+                    dr = json.loads(direct_response)
+                    reply = dr.get("message", direct_response)
+                except json.JSONDecodeError:
+                    reply = direct_response
+            else:
+                reply = direct_response
+        elif not reply and result.get("messages"):
+            last_msg = result["messages"][-1]
+            reply = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
+        # ---- DSML 降级检测 ----
+        if "<\uff5c\uff5cDSML\uff5c\uff5c" in reply:
+            logger.warning("[chat_api_async] 检测到 DSML 工具调用标记，触发降级")
+            reply = "抱歉，暂时无法获取相关条款信息，建议转人工客服咨询。"
+
+        transfer_flag = _check_transfer_flag(result, history_count)
+        input_tokens, output_tokens, cached_tokens = _process_usage(result)
+        timer.stop("总耗时")
+        _log_token_and_perf(session_id, route, input_tokens, output_tokens, cached_tokens, timer, timing_handler)
+
+        # ---- 异步触发长期记忆提取 ----
+        try:
+            spawn_memory_extraction(user_id, message, reply)
+        except Exception as e:
+            logger.debug("[记忆] spawn_memory_extraction 触发异常（已忽略）: %s", e)
+
+        if transfer_flag:
+            ticket_id = f"TK{int(time.time())}{session_id[-4:]}"
+            clean_reply = reply.replace(TRANSFER_SIGNAL, "").strip()
+            return {
+                "success": 0,
+                "content": {
+                    "reply": clean_reply or "正在为您转接人工客服，请稍候...",
+                    "transfer": True,
+                    "ticket_id": ticket_id
+                },
+                "route": route.value,
+                "elapsed_ms": timer.get_total_ms()
+            }
+
+        return {
+            "success": 0,
+            "content": {
+                "reply": reply,
+                "transfer": False
+            },
+            "route": route.value,
+            "elapsed_ms": timer.get_total_ms()
+        }
+
+    except GraphRecursionError as e:
+        logger.error("GraphRecursionError: %s", e, exc_info=True)
+        return _error_response(ErrorCode.GRAPH_RECURSION_LIMIT)
+    except Exception as e:
+        logger.error("chat_api_async 异常: %s", e, exc_info=True)
+        return _error_response(ErrorCode.UNKNOWN)
+
+
 async def chat_api_stream(session_id: str, message: str, user_id: str = ""):
     """
     流式对话接口（async generator）
