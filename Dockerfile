@@ -4,6 +4,10 @@ WORKDIR /app
 # 构建参数：默认 requirements.txt（本地/阿里云有 GPU），生产传 requirements-prod.txt（无 GPU，镜像更小）
 ARG REQ_FILE=requirements.txt
 
+# 阿里云服务器访问 Debian 官方源慢/不通，换阿里云镜像
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true
+
 # libgomp1：CUDA 版 torch 的 OpenMP 运行库依赖，python:slim 默认不含，缺失会导致 import torch 失败
 # requirements-prod.txt 不含 torch，但装 libgomp1 无害（~2MB），保持 Dockerfile 统一
 # ffmpeg：飞书语音 opus 转 wav（ASR 模块需要）
