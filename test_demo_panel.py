@@ -88,31 +88,29 @@ def build_test_cases():
     """
     cases = []
 
-    # ---- 栏 1：工具调用（5 个输入，同一 session_id）----
+    # ---- 栏 1：工具调用（6 个输入，同一 session_id）----
     s1 = f"test_tool_{uuid.uuid4().hex[:8]}"
     cases.append(("栏1-1 保费计算①", s1, "", "帮我算一下特斯拉的保费", "send"))
     cases.append(("栏1-2 保费计算②", s1, "", "37岁，驾龄5年", "send"))
-    cases.append(("栏1-3 保单查询",   s1, "", "帮我查保单，保单号 POL20260001", "send"))
-    cases.append(("栏1-4 条款检索",   s1, "", "车损险保障哪些情况？", "send"))
-    cases.append(("栏1-5 转人工",     s1, "", "我要投诉，转人工", "send"))
+    cases.append(("栏1-3 保单查询①", s1, "", "帮我查保单，保单号 POL20260001", "send"))
+    cases.append(("栏1-4 保单查询②", s1, "", "110101199001011234", "send"))
+    cases.append(("栏1-5 条款检索",   s1, "", "车损险保障哪些情况？", "send"))
+    cases.append(("栏1-6 转人工",     s1, "", "我要投诉，转人工", "send"))
 
-    # ---- 栏 2：记忆测试（5 个输入，需登录 user_id）----
+    # ---- 栏 2：记忆测试（3 个输入，需登录 user_id）----
     # 短期记忆：同一 session_id
     s2 = f"test_mem_{uuid.uuid4().hex[:8]}"
-    cases.append(("栏2-1 短期记忆①告诉身份", s2, TEST_USER_ID, "我叫张三，身份证 110101199001011234", "send"))
-    cases.append(("栏2-2 短期记忆②验证",     s2, TEST_USER_ID, "我叫什么名字？", "send"))
-    cases.append(("栏2-3 长期记忆①告诉车辆", s2, TEST_USER_ID, "我的车去年出险了", "send"))
+    cases.append(("栏2-1 告诉信息", s2, TEST_USER_ID, "我叫张三，身份证 110101199001011234，我的车去年出险了", "send"))
+    cases.append(("栏2-2 短期记忆验证", s2, TEST_USER_ID, "我叫什么名字？", "send"))
 
-    # 模拟「清空对话」：新 session_id，同 user_id
+    # 模拟「清空对话」：新 session_id，同 user_id（长期记忆）
     s2b = f"test_mem_cleared_{uuid.uuid4().hex[:8]}"
     cases.append(("--- 清空对话（新 session） ---", s2b, TEST_USER_ID, None, "clear"))
-    cases.append(("栏2-4 长期记忆②验证结构化", s2b, TEST_USER_ID, "我叫什么名字？", "send"))
-    cases.append(("栏2-5 长期记忆③验证语义",   s2b, TEST_USER_ID, "我出过险吗？", "send"))
+    cases.append(("栏2-3 长期记忆验证(结构化+语义)", s2b, TEST_USER_ID, "我叫什么名字？我出过险吗？", "send"))
 
-    # ---- 栏 3：前端输入（2 个输入，排除超长输入）----
+    # ---- 栏 3：前端输入（1 个输入）----
     s3 = f"test_edge_{uuid.uuid4().hex[:8]}"
-    cases.append(("栏3-1 无关问题(RAG)", s3, "", "太空飞船的保险赔不赔？", "send"))
-    cases.append(("栏3-2 模糊意图(L4)", s3, "", "你帮我看看", "send"))
+    cases.append(("栏3-1 模糊意图(L4)", s3, "", "你帮我看看", "send"))
 
     return cases
 
@@ -131,52 +129,42 @@ EXPECTED = {
         "reply_contains": ["保费", "元"],
         "desc": "DST 承接上轮，补全参数后应返回保费结果",
     },
-    "栏1-3 保单查询": {
+    "栏1-3 保单查询①": {
+        "route": "service",
+        "reply_contains": ["保单", "身份证", "证件"],
+        "desc": "应路由 service，调用 query_policy，因缺身份证会反问",
+    },
+    "栏1-4 保单查询②": {
         "route": "service",
         "reply_contains": ["保单"],
-        "desc": "应路由 service，调用 query_policy",
+        "desc": "DST 承接上轮，补全身份证后应返回保单结果",
     },
-    "栏1-4 条款检索": {
+    "栏1-5 条款检索": {
         "route": ["sale", "service"],
         "reply_contains": ["条款", "保险", "车损"],
         "desc": "应调用 search_insurance_terms（RAG 检索）",
     },
-    "栏1-5 转人工": {
+    "栏1-6 转人工": {
         "route": "general",  # L0 安全拦截 → intent=handoff → agent_type 回退 general
         "reply_contains": ["人工", "转接", "工单"],
         "desc": "L0 安全拦截 → 转人工短路直返",
     },
-    "栏2-1 短期记忆①告诉身份": {
-        "route": "general",
+    "栏2-1 告诉信息": {
+        "route": ["general", "service"],  # "出险" 可能触发 service 意图
         "reply_contains": ["张三"],
-        "desc": "应确认用户身份",
+        "desc": "应确认用户身份和车辆信息，触发记忆提取",
     },
-    "栏2-2 短期记忆②验证": {
+    "栏2-2 短期记忆验证": {
         "route": "general",
         "reply_contains": ["张三"],
         "desc": "应从对话历史回忆姓名=张三",
     },
-    "栏2-3 长期记忆①告诉车辆": {
-        "route": ["general", "service"],  # "出险" 可能触发 service 意图
-        "reply_contains": [],
-        "desc": "应回应车辆信息，触发记忆提取",
-    },
-    "栏2-4 长期记忆②验证结构化": {
-        "route": "general",
-        "reply_contains": ["张三"],
-        "desc": "清空对话后，应从结构化记忆(sqlite)回忆姓名=张三",
-    },
-    "栏2-5 长期记忆③验证语义": {
+    "栏2-3 长期记忆验证(结构化+语义)": {
         "route": ["general", "service"],  # "出过险" 可能触发 service 意图
-        "reply_contains": ["出险", "出过险"],
-        "desc": "应从语义记忆(PG向量)回忆车辆出险信息",
+        "reply_contains": ["张三", "出险", "出过险"],
+        "desc": "清空对话后，应从结构化记忆(sqlite)回忆姓名=张三，从语义记忆(PG向量)回忆出险信息",
     },
-    "栏3-1 无关问题(RAG)": {
-        "route": ["sale", "service", "general"],
-        "reply_contains": [],
-        "desc": "RAG 应检索不到相关条款，可能返回未找到或兜底回复",
-    },
-    "栏3-2 模糊意图(L4)": {
+    "栏3-1 模糊意图(L4)": {
         "route": "general",
         "reply_contains": [],
         "desc": "应触发 L4 澄清反问或路由到 general",

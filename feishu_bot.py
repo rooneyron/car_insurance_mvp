@@ -44,6 +44,7 @@ from lark_oapi.api.im.v1 import (
     P2ImMessageReceiveV1,
     ReplyMessageRequest,
     ReplyMessageRequestBody,
+    GetMessageResourceRequest,
 )
 
 # 保证可 import src.*（standalone 运行时用；被 app.py import 时 sys.path 通常已就绪，重复插入无害）
@@ -155,6 +156,125 @@ def _reply_card(message_id: str, card_str: str, max_retries: int = 2) -> None:
 # 3. 接收消息事件处理器（直连 chat_api，in-process）
 # ============================================================
 
+def _download_feishu_audio(message_id: str, file_key: str) -> bytes:
+    """下载飞书语音消息的音频文件
+    
+    返回音频二进制数据，失败返回空 bytes
+    """
+    try:
+        request = (
+            GetMessageResourceRequest.builder()
+            .message_id(message_id)
+            .file_key(file_key)
+            .type("file")
+            .build()
+        )
+        response = _api_client.im.v1.message_resource.get(request)
+        
+        if not response.success():
+            logger.error("[飞书音频] 下载失败: code=%s, msg=%s", response.code, response.msg)
+            return b""
+        
+        # 读取二进制流
+        audio_data = response.file.read() if response.file else b""
+        logger.info("[飞书音频] 下载成功: %d bytes", len(audio_data))
+        return audio_data
+    
+    except Exception as e:
+        logger.error("[飞书音频] 下载异常: %s", e)
+        return b""
+
+
+def _process_audio_message(message_id: str, session_id: str, user_id: str, file_key: str, duration_ms: int) -> None:
+    """处理语音消息：下载音频 → ASR 转文字 → 走 chat 流程
+    
+    在线程池内异步执行
+    """
+    from src.asr import speech_to_text
+    
+    start_time = time.time()
+    duration_sec = duration_ms / 1000.0
+    logger.info("[语音] 开始处理: message_id=%s, duration=%.1fs, file_key=%s", 
+                message_id, duration_sec, file_key)
+    
+    # 1. 发送占位消息
+    try:
+        placeholder_card = _build_card("🎤 正在聆听，请稍候...")
+        _reply_card(message_id, placeholder_card)
+    except Exception as e:
+        logger.warning("[语音] 发送占位消息失败: %s", e)
+    
+    # 2. 下载音频
+    audio_data = _download_feishu_audio(message_id, file_key)
+    if not audio_data:
+        logger.error("[语音] 音频下载失败")
+        try:
+            _reply_card(message_id, _build_card("抱歉，无法获取语音消息，请重试或打字输入。"))
+            mark_message_processed(message_id)
+        except Exception:
+            pass
+        return
+    
+    # 3. ASR 识别
+    # 飞书语音格式是 opus，先尝试直接传，失败会自动 fallback 转 wav
+    recognized_text = speech_to_text(audio_data, file_ext="opus")
+    
+    asr_elapsed = time.time() - start_time
+    logger.info("[语音] ASR 完成: text='%s', elapsed=%.1fs", 
+                recognized_text[:50] if recognized_text else "(空)", asr_elapsed)
+    
+    # 4. 识别失败处理
+    if not recognized_text:
+        logger.warning("[语音] ASR 识别结果为空")
+        try:
+            _reply_card(message_id, _build_card("抱歉，没有听清您说的内容，可以再说一遍吗？或者打字输入也可以~"))
+            mark_message_processed(message_id)
+        except Exception:
+            pass
+        return
+    
+    # 5. 识别成功，走 chat 流程（和文本消息一样）
+    try:
+        result = chat_api(session_id, recognized_text, user_id, stream=False)
+    except Exception as e:
+        logger.error("[语音] chat_api 异常: %s", e)
+        try:
+            _reply_card(message_id, _build_card("服务开小差了，请稍后再试。"))
+        except Exception:
+            pass
+        return
+    
+    # 6. 解析响应并回复
+    if result.get("success") == 0:
+        content = result.get("content") or {}
+        reply_text = content.get("reply") or "(空回复)"
+        transfer = bool(content.get("transfer"))
+        ticket_id = content.get("ticket_id", "")
+        
+        # 在回复顶部加上语音识别结果提示
+        header = f"🎤 **语音转文字**：{recognized_text}\n\n---\n\n"
+        full_reply = header + reply_text
+        
+        logger.info("[语音] chat_api 返回: route=%s, transfer=%s, reply_len=%d", 
+                    result.get('route'), transfer, len(reply_text))
+        
+        try:
+            _reply_card(message_id, _build_card(full_reply, transfer, ticket_id))
+            mark_message_processed(message_id)
+            logger.info("[语音] 回复成功: message_id=%s, total_elapsed=%.1fs", 
+                        message_id, time.time() - start_time)
+        except Exception as e:
+            logger.error("[语音] 回复失败: %s", e)
+    else:
+        err_msg = result.get("error_msg") or "服务开小差了，请稍后再试。"
+        logger.warning("[语音] 业务错误: %s", err_msg)
+        try:
+            _reply_card(message_id, _build_card(err_msg))
+            mark_message_processed(message_id)
+        except Exception:
+            pass
+
+
 def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     """收到飞书消息事件 -> 轻量提取 + 只读判重 -> 提交线程池异步处理 -> 立即返回。
 
@@ -167,29 +287,45 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     try:
         event = data.event
         message = event.message
-        # 只处理文本消息，其他类型（图片/语音/富文本/表情包等）直接忽略
-        if message.message_type != "text":
-            print(f"[忽略] 非文本消息: message_type={message.message_type}")
+        message_type = message.message_type
+        
+        # 只处理文本和语音消息，其他类型（图片/富文本/表情包等）直接忽略
+        if message_type not in ("text", "audio"):
+            print(f"[忽略] 非文本/语音消息: message_type={message_type}")
             return
 
         open_id = event.sender.sender_id.open_id
         chat_id = message.chat_id          # oc_ 开头，会话标识（单聊/群各自独立）
         message_id = message.message_id    # om_ 开头，用于回复这条消息
-        # message.content 是 JSON 字符串，形如 {"text":"你好"}
-        text = json.loads(message.content).get("text", "").strip()
 
         # 只读判重：已成功回复过的消息，飞书重投/重连补推时直接跳过（不回复、不调 chat、不存记忆）。
-        # 注意此处只查不登记——登记由 _process_and_reply 在 reply 成功后 mark_message_processed 完成，
-        # 避免回复失败的消息被误标记、重投时跳过导致用户永远收不到回复。
         if is_duplicate_message(message_id):
             logger.info("重复消息，跳过: %s", message_id)
             return
 
-        print(f"[收到消息] open_id={open_id}, chat_id={chat_id}, message_id={message_id}, 内容={text}")
-
-        # 提交线程池异步处理，本函数立即返回 -> SDK 及时 ack -> 飞书不因超时重投
         session_id = chat_id or open_id    # 每会话独立多轮上下文；user_id=open_id（长期记忆主键）
-        _executor.submit(_process_and_reply, message_id, text, session_id, open_id)
+        
+        # ---- 分支处理：文本 vs 语音 ----
+        if message_type == "text":
+            # message.content 是 JSON 字符串，形如 {"text":"你好"}
+            text = json.loads(message.content).get("text", "").strip()
+            print(f"[收到文本] open_id={open_id}, chat_id={chat_id}, message_id={message_id}, 内容={text}")
+            _executor.submit(_process_and_reply, message_id, text, session_id, open_id)
+        
+        elif message_type == "audio":
+            # message.content 是 JSON 字符串，形如 {"file_key":"xxx","duration":3000}
+            audio_content = json.loads(message.content)
+            file_key = audio_content.get("file_key", "")
+            duration_ms = audio_content.get("duration", 0)  # 毫秒
+            
+            if not file_key:
+                logger.warning("[收到语音] file_key 为空，忽略")
+                return
+            
+            print(f"[收到语音] open_id={open_id}, chat_id={chat_id}, message_id={message_id}, "
+                  f"duration={duration_ms}ms, file_key={file_key}")
+            _executor.submit(_process_audio_message, message_id, session_id, open_id, file_key, duration_ms)
+    
     except Exception as e:
         # 提取/判重阶段异常（此时可能拿不到 message_id，无法异步处理）；打印不抛出，保住长连接
         print(f"[handler异常] {type(e).__name__}: {e}")

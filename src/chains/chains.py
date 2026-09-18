@@ -465,12 +465,24 @@ def _make_agent_node(llm):
             llm_runner = llm.bind_tools(tools) if tools else llm
             result = None
             chunk_count = 0
+            stream_start = time.time()
+            first_chunk_time = None
             if stream_mode:
                 async for chunk in llm_runner.astream(full_messages):
                     chunk_count += 1
+                    if first_chunk_time is None:
+                        first_chunk_time = time.time()
+                        logger.debug("[Agent-Stream] 首 chunk 到达 (agent=%s, 等待=%.0fms)",
+                                     agent_type, (first_chunk_time - stream_start) * 1000)
                     result = chunk if result is None else result + chunk
                 if result is None:
                     result = AIMessage(content="")  # 极端兜底：流未产生任何 chunk，避免后续 NoneType 崩溃
+                # 流式完成日志
+                stream_end = time.time()
+                logger.debug("[Agent-Stream] 流式完成 (agent=%s, chunks=%d, 首chunk=%.0fms, 总耗时=%.0fms)",
+                             agent_type, chunk_count,
+                             (first_chunk_time - stream_start) * 1000 if first_chunk_time else 0,
+                             (stream_end - stream_start) * 1000)
             else:
                 # 非流式：一次性取完整结果（API 非流式链路），不走 chunk 累积
                 result = await llm_runner.ainvoke(full_messages)
