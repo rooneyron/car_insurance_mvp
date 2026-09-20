@@ -93,7 +93,7 @@ if __name__ == "__main__":
     # 与 Gradio 一样直接调用 chat_api_async（不走 HTTP/JWT），复用上面已预加载的 graph/RAG/记忆。
     # 未配置飞书凭证会自动跳过；任何异常都被吞掉，绝不影响 API/Gradio 主服务。
     try:
-        import feishu_bot
+        from src.feishu import feishu_bot
         # 先启动飞书专用事件循环（解决 asyncio.run 创建/销毁循环导致 httpx 连接池报错）
         feishu_bot.start_feishu_loop()
         feishu_bot.start_in_background()

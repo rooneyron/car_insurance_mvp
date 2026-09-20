@@ -30,11 +30,11 @@ logs/
 .DS_Store
 Thumbs.db
 
-# 测试目录
-tests/
+# 测试目录（保留 tests/ 下的正式测试脚本）
+# tests/
 
-# RAG 评估脚本与结果
-eval_*.py
+# RAG 评估脚本与结果（保留 eval/ 目录下的评估脚本）
+# eval_*.py
 eval_*.json
 eval_*.txt
 eval_*.md

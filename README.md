@@ -127,7 +127,6 @@ python generate_token.py
 ```text
 car_insurance_mvp/
 ├── app.py                      # FastAPI 主入口（启动、预热、路由挂载）
-├── feishu_bot.py               # 飞书机器人（in-process 直连 chat_api，长连接事件 → interactive 卡片回复，语音消息 ASR）
 ├── generate_token.py           # JWT Token 生成脚本
 ├── Dockerfile                  # Docker 容器化构建配置（含 ffmpeg + 阿里云 apt 镜像）
 ├── docker-compose.yml          # 本地开发 Docker 配置（GPU + 本地 Rerank）
@@ -166,6 +165,9 @@ car_insurance_mvp/
 │   │   └── schemas.py          #     路由结果数据结构
 │   ├── chains/
 │   │   └── chains.py           #   LangGraph StateGraph 编排 + 工具定义（@tool）+ 摘要节点
+│   ├── feishu/                 #   飞书机器人模块
+│   │   ├── feishu_bot.py       #     飞书机器人（in-process 直连 chat_api，长连接事件 → interactive 卡片回复，语音消息 ASR）
+│   │   └── feishu_ws_echo.py   #     飞书 WebSocket 调试工具
 │   ├── utils/
 │   │   └── conn_diag.py        #   LLM 连接诊断（超时/重试/HTTP-DIAG）
 │   └── memory/                 #   长期记忆模块（结构化 + 语义双存储 + 对话后异步提取）
@@ -177,14 +179,22 @@ car_insurance_mvp/
 │       ├── mask.py             #     敏感信息掩码（身份证/手机/车牌遮罩）
 │       └── dedup_store.py      #     飞书消息去重（只读判重 + reply 成功后登记）
 │
-├── scripts/                    # 离线数据脚本（.gitignore 忽略）
+├── tests/                      # 测试脚本
+│   ├── test_demo_panel.py      #   自动化演示测试（三栏 10 按钮端到端验证）
+│   ├── test_mask.py            #   敏感信息掩码单元测试
+│   └── test_reader.py          #   记忆读取单元测试
+│
+├── eval/                       # 评估脚本
+│   └── eval_rag_retrieval.py   #   RAG 检索质量评估
+│
+├── route_eval/                 # 路由意图离线评测
+│   └── eval_route.py           #   比对 data/intent_eval_dataset.json
+│
+├── scripts/                    # 离线数据脚本
 │   ├── pdf_to_text.py          #   PDF → 文本
 │   ├── clean_text.py           #   文本清洗
 │   ├── chunk_clauses.py        #   条款切块 → chunk_metadata.json
 │   └── build_faiss_index.py    #   FAISS 索引构建（保留 · 预留熔断降级用）
-│
-├── route_eval/                 # 路由意图离线评测（.gitignore 忽略）
-│   └── eval_route.py           #   比对 data/intent_eval_dataset.json
 │
 ├── data/                       # 数据文件
 │   ├── chunk_metadata.json     #   ★ 切块元数据（128 条 · ParadeDB 灌库源）
@@ -206,15 +216,9 @@ car_insurance_mvp/
 │   ├── architecture.mmd        #   系统架构图（Mermaid 源文件）
 │   └── architecture.png        #   系统架构图（PNG）
 │
-├── tools/                      # 迁移/运维脚本
-│   ├── __init__.py
-│   └── ingest_to_pg.py         #   一次性灌库：data/chunk_metadata.json → ParadeDB（128 条）
-│
-├── test_demo_panel.py          # 自动化演示测试脚本（三栏 10 按钮端到端验证）
-├── test_volc_asr.py            # 火山引擎 ASR 独立测试脚本
-│
-└── config/
-    └── config.yaml             #   路由关键词配置
+└── tools/                      # 迁移/运维脚本
+    ├── __init__.py
+    └── ingest_to_pg.py         #   一次性灌库：data/chunk_metadata.json → ParadeDB（128 条）
 ```
 
 ## 关键决策记录

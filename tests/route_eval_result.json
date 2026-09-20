@@ -1,0 +1,1547 @@
+{
+  "meta": {
+    "generated_at": "2026-09-07 10:20:36",
+    "dataset_path": "data/intent_eval_dataset.json",
+    "dataset_size": 84,
+    "entry": "src/router/router.py::route_message",
+    "classifier_model": "qwen-turbo",
+    "classifier_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "reviewer_model": "deepseek-v4-flash",
+    "router_config": {
+      "l2_accept_threshold": 0.7,
+      "l2_review_threshold": 0.5,
+      "l3_accept_threshold": 0.6
+    },
+    "isolation": "fresh RouterState per query (DST skipped)",
+    "elapsed_sec": 47.1
+  },
+  "summary": {
+    "total": 84,
+    "strict_match": 74,
+    "strict_match_rate": 0.881,
+    "effective_match": 84,
+    "effective_match_rate": 1.0,
+    "source_distribution": {
+      "l2": 65,
+      "l4_clarify": 7,
+      "l1_keyword": 7,
+      "l3": 2,
+      "l0_safety": 3
+    },
+    "llm_calls": {
+      "l2_classifier": 74,
+      "l3_reviewer": 2
+    },
+    "category_breakdown": {
+      "chitchat": {
+        "total": 15,
+        "strict_match": 14
+      },
+      "sale_core": {
+        "total": 20,
+        "strict_match": 20
+      },
+      "service_core": {
+        "total": 20,
+        "strict_match": 17
+      },
+      "shared_knowledge": {
+        "total": 20,
+        "strict_match": 20
+      },
+      "ambiguous": {
+        "total": 9,
+        "strict_match": 3
+      }
+    },
+    "mismatch_classification": {
+      "l0_handoff": 3,
+      "l4_clarify": 7,
+      "real_error": 0
+    }
+  },
+  "records": [
+    {
+      "query": "你好",
+      "category": "chitchat",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "在吗",
+      "category": "chitchat",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "谢谢",
+      "category": "chitchat",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "positive",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "再见",
+      "category": "chitchat",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "今天天气怎么样",
+      "category": "chitchat",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "你是谁",
+      "category": "chitchat",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "你会什么",
+      "category": "chitchat",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "给我讲个笑话",
+      "category": "chitchat",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "我不想聊了",
+      "category": "chitchat",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "asdfghjkl",
+      "category": "chitchat",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "clarify",
+      "source": "l4_clarify",
+      "action": "clarify",
+      "confidence": 0.0,
+      "sentiment": "neutral",
+      "strict_correct": false,
+      "mismatch_type": "l4_clarify",
+      "error": null
+    },
+    {
+      "query": "。。。",
+      "category": "chitchat",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "哈哈哈",
+      "category": "chitchat",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "你是真人吗",
+      "category": "chitchat",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "现在几点了",
+      "category": "chitchat",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "帮我查一下快递",
+      "category": "chitchat",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "帮我算一下保费",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "我要买车险",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l1_keyword",
+      "action": "route",
+      "confidence": 1.0,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "我想续保",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l1_keyword",
+      "action": "route",
+      "confidence": 1.0,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "续保多少钱",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l1_keyword",
+      "action": "route",
+      "confidence": 1.0,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "三者险买100万还是200万",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "100万三者险够吗",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "车损险和三者险有什么区别",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算",
+        "条款查询"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "保费可以分期吗",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "投保需要什么材料",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "新车第一次买保险",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "你们有什么保险产品",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "车上人员险有没有必要买",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算",
+        "条款查询"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "划痕险多少钱",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "医保外用药责任险是什么",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算",
+        "条款查询"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "买保险要带什么",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "全险多少钱",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "车损险保额怎么选",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "第二年保费怎么算",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.85,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "不出险保费优惠多少",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "过户后保费怎么算",
+      "category": "sale_core",
+      "allowed_routes": [
+        "sale"
+      ],
+      "required_tools": [
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l3",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "保单怎么查",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "我的保单到期了吗",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "我要报案",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l1_keyword",
+      "action": "route",
+      "confidence": 1.0,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "理赔进度怎么查",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l1_keyword",
+      "action": "route",
+      "confidence": 1.0,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "退保怎么退",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "车卖了过户保险还有效吗",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "可以加保吗",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l1_keyword",
+      "action": "route",
+      "confidence": 1.0,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "保单丢了怎么办",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "理赔多久能到账",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "我要投诉",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [],
+      "intent": "handoff",
+      "source": "l0_safety",
+      "action": "handoff",
+      "confidence": 1.0,
+      "sentiment": "neutral",
+      "strict_correct": false,
+      "mismatch_type": "l0_handoff",
+      "error": null
+    },
+    {
+      "query": "转人工",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [],
+      "intent": "handoff",
+      "source": "l0_safety",
+      "action": "handoff",
+      "confidence": 1.0,
+      "sentiment": "neutral",
+      "strict_correct": false,
+      "mismatch_type": "l0_handoff",
+      "error": null
+    },
+    {
+      "query": "我要找客服",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [],
+      "intent": "handoff",
+      "source": "l0_safety",
+      "action": "handoff",
+      "confidence": 1.0,
+      "sentiment": "neutral",
+      "strict_correct": false,
+      "mismatch_type": "l0_handoff",
+      "error": null
+    },
+    {
+      "query": "保单批改怎么办理",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "怎么修改保单信息",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "保单复印件能理赔吗",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "电子保单有效吗",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "保单受益人怎么改",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "理赔需要什么材料",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "定损流程是什么",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "我车被别人刮了对方跑了",
+      "category": "service_core",
+      "allowed_routes": [
+        "service"
+      ],
+      "required_tools": [
+        "保单查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "negative",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "车损险保哪些责任",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "三者险能赔医保外用药吗",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "三者险赔多少",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "免赔额是什么意思",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "代位求偿是什么意思",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "我车被冰雹砸了车损险赔吗",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "对方不赔钱我能找自己保险公司赔吗",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "车损险赔款怎么计算",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "交强险垫付的抢救费能追回来吗",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "事故了怎么处理",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "修车费用谁出",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "service",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "续保怎么弄",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询",
+        "保费计算"
+      ],
+      "intent": "sale",
+      "source": "l1_keyword",
+      "action": "route",
+      "confidence": 1.0,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "机动车损失保险的保险责任有哪些",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "机动车第三者责任保险的责任限额",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "保险期间是多久",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "车上人员险什么情况不赔",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "三者险什么情况不赔",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "交强险保什么",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "绝对免赔额和相对免赔额区别",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "不计免赔险是什么",
+      "category": "shared_knowledge",
+      "allowed_routes": [
+        "sale",
+        "service"
+      ],
+      "required_tools": [
+        "条款查询"
+      ],
+      "intent": "sale",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "嗯",
+      "category": "ambiguous",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l3",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "哦",
+      "category": "ambiguous",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.85,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "那个",
+      "category": "ambiguous",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "clarify",
+      "source": "l4_clarify",
+      "action": "clarify",
+      "confidence": 0.0,
+      "sentiment": "neutral",
+      "strict_correct": false,
+      "mismatch_type": "l4_clarify",
+      "error": null
+    },
+    {
+      "query": "随便",
+      "category": "ambiguous",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "general",
+      "source": "l2",
+      "action": "route",
+      "confidence": 0.95,
+      "sentiment": "neutral",
+      "strict_correct": true,
+      "mismatch_type": null,
+      "error": null
+    },
+    {
+      "query": "我想问一下",
+      "category": "ambiguous",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "clarify",
+      "source": "l4_clarify",
+      "action": "clarify",
+      "confidence": 0.0,
+      "sentiment": "neutral",
+      "strict_correct": false,
+      "mismatch_type": "l4_clarify",
+      "error": null
+    },
+    {
+      "query": "你帮我看看",
+      "category": "ambiguous",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "clarify",
+      "source": "l4_clarify",
+      "action": "clarify",
+      "confidence": 0.0,
+      "sentiment": "neutral",
+      "strict_correct": false,
+      "mismatch_type": "l4_clarify",
+      "error": null
+    },
+    {
+      "query": "我的车",
+      "category": "ambiguous",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "clarify",
+      "source": "l4_clarify",
+      "action": "clarify",
+      "confidence": 0.0,
+      "sentiment": "neutral",
+      "strict_correct": false,
+      "mismatch_type": "l4_clarify",
+      "error": null
+    },
+    {
+      "query": "怎么办",
+      "category": "ambiguous",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "clarify",
+      "source": "l4_clarify",
+      "action": "clarify",
+      "confidence": 0.0,
+      "sentiment": "neutral",
+      "strict_correct": false,
+      "mismatch_type": "l4_clarify",
+      "error": null
+    },
+    {
+      "query": "可以吗",
+      "category": "ambiguous",
+      "allowed_routes": [
+        "general"
+      ],
+      "required_tools": [],
+      "intent": "clarify",
+      "source": "l4_clarify",
+      "action": "clarify",
+      "confidence": 0.0,
+      "sentiment": "neutral",
+      "strict_correct": false,
+      "mismatch_type": "l4_clarify",
+      "error": null
+    }
+  ]
+}
