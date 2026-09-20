@@ -68,6 +68,14 @@ if __name__ == "__main__":
     except Exception as e:
         logger.warning("记忆存储初始化失败（不影响服务）: %s", e)
 
+    # ---------- 访问计数器：初始化内存计数 + 加载当天 DB 数据 ----------
+    try:
+        from src.visit_counter import init_visit_counter
+        init_visit_counter()
+        logger.info("访问计数器就绪")
+    except Exception as e:
+        logger.warning("访问计数器初始化失败（不影响服务）: %s", e)
+
     # ---------- 组装应用 ----------
     app = create_app()
     demo = create_gradio_interface()

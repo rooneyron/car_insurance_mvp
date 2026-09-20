@@ -10,6 +10,7 @@ from src.chat import chat_api_stream
 from src.route_types import Route, ROUTE_LABELS
 from src.logger import get_logger
 from src.auth import validate_user_id
+from src.visit_counter import increment_visit
 
 logger = get_logger(__name__)
 
@@ -281,6 +282,9 @@ def create_gradio_interface():
         
         # 页面加载时生成 session_id
         demo.load(_new_session_id, None, session_state)
+
+        # 页面加载时记录访问计数
+        demo.load(increment_visit, None, None)
 
         # 页面加载时从浏览器 localStorage 恢复用户标识登录态显示（刷新不丢失）
         demo.load(

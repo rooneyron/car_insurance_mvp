@@ -14,6 +14,7 @@ from src.constants import APP_VERSION, SERVICE_NAME, JWT_ALGORITHM, PUBLIC_PATHS
 from src.token_usage import get_today_usage, DAILY_TOKEN_LIMIT
 from src.chat import chat_api, chat_api_stream
 from src.rag import get_last_rag_pipeline_stats, get_last_rag_query
+from src.visit_counter import get_all_visits
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -108,6 +109,11 @@ def register_routes(application: FastAPI):
             "total_tokens": usage["total_tokens"],
             "daily_token_limit": DAILY_TOKEN_LIMIT,
         }
+
+    @application.get("/visits")
+    async def visits():
+        """查询访问统计（无需 Token）"""
+        return get_all_visits()
 
     class ChatRequest(BaseModel):
         session_id: str

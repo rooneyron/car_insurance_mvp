@@ -59,4 +59,4 @@ GRAPH_RECURSION_LIMIT = 50
 JWT_ALGORITHM = "HS256"
 
 # ---------- API 路径白名单（无需 Token） ----------
-PUBLIC_PATHS = {"/health", "/", "/manifest.json", "/favicon.ico", "/queryToken", "/docs", "/openapi.json"}
+PUBLIC_PATHS = {"/health", "/", "/manifest.json", "/favicon.ico", "/queryToken", "/docs", "/openapi.json", "/visits"}
