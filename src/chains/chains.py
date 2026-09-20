@@ -5,6 +5,7 @@ LangGraph StateGraph 多 Agent 编排
 
 import os
 import json
+import copy
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
@@ -249,6 +250,9 @@ class GraphState(TypedDict):
     # ---- DST 状态 ----
     current_task: Optional[str]    # 当前未完成任务：sale / service / None
     awaiting_slot: Optional[str]   # 当前等待补充的参数名（如 id_card）
+    # ---- 用户标识（极简登录）----
+    user_id: str                   # 用户标识；空串=未登录。由入口经 input_data 写入，供各节点读取（后续长期记忆功能使用）
+    user_memory: Optional[dict]    # 长期记忆读取结果 {prompt_text(掩码), semantic}；入口经 input_data 写入，供 agent 注入 prompt、tools 解码 id_card
 
 
 # ============================================================
@@ -314,6 +318,9 @@ def _make_router_node(llm_classifier, llm_reviewer):
 
     def router_node(state: GraphState, config: RunnableConfig) -> dict:
         session_id = config.get("configurable", {}).get("thread_id", "default")
+        # 读取用户标识（入口经 input_data 写入 state；空串表示未登录）——验证整条链路可从 state 取到 user_id
+        user_id = state.get("user_id", "")
+        logger.info("[Router] user_id=%s", user_id or "(未登录)")
         messages = state.get("messages", [])
         summary = state.get("summary", None)
 
@@ -424,7 +431,7 @@ def _make_router_node(llm_classifier, llm_reviewer):
 
 
 def _make_agent_node(llm):
-    """Agent 节点（决策 + 回复）：流式调用 LLM 决定是否调用工具；不调工具时其 content 即最终回复。
+    """Agent 节点（决策 + 回复）：按 config 的 stream 开关流式/非流式调用 LLM 决定是否调用工具；不调工具时其 content 即最终回复。
 
     agent 直接对前端负责：调工具轮 content 为空、累积重建 tool_calls 供路由；
     直接回复轮 content 即成品回复，流式推给前端并写入 reply 字段（供非流式 chat_api 取用）。
@@ -435,6 +442,11 @@ def _make_agent_node(llm):
     async def agent_node(state: GraphState, config: RunnableConfig) -> dict:
         agent_type = state.get("agent_type", Route.GENERAL.value)
         system_prompt = AGENT_SYSTEM_PROMPTS.get(agent_type, AGENT_SYSTEM_PROMPTS[INTENT_GENERAL])
+        # ---- 长期记忆注入：把掩码后的用户记忆追加到 system_prompt（不改 prompts.py 模板）----
+        _mem = state.get("user_memory") or {}
+        _mem_prompt = _mem.get("prompt_text", "") if isinstance(_mem, dict) else ""
+        if _mem_prompt:
+            system_prompt = system_prompt + "\n\n" + _mem_prompt
         tools = AGENT_TOOLS.get(agent_type, [])
         messages = list(state.get("messages", []))
         # 过滤掉空的 AIMessage（历史遗留），避免浪费 token
@@ -446,15 +458,35 @@ def _make_agent_node(llm):
         is_first_round = not any(isinstance(m, ToolMessage) for m in messages)
         round_label = "第1轮/调工具轮" if is_first_round else "第2轮/直接回复轮"
 
+        # 流式开关：由入口经 config configurable 透传（API 的 stream 字段 / Gradio 流式路径），
+        # 默认 True 保持流式行为（兼容未传该字段的调用方）。
+        stream_mode = config.get("configurable", {}).get("stream", True)
         try:
             llm_runner = llm.bind_tools(tools) if tools else llm
             result = None
             chunk_count = 0
-            async for chunk in llm_runner.astream(full_messages):
-                chunk_count += 1
-                result = chunk if result is None else result + chunk
-            if result is None:
-                result = AIMessage(content="")  # 极端兜底：流未产生任何 chunk，避免后续 NoneType 崩溃
+            stream_start = time.time()
+            first_chunk_time = None
+            if stream_mode:
+                async for chunk in llm_runner.astream(full_messages):
+                    chunk_count += 1
+                    if first_chunk_time is None:
+                        first_chunk_time = time.time()
+                        logger.debug("[Agent-Stream] 首 chunk 到达 (agent=%s, 等待=%.0fms)",
+                                     agent_type, (first_chunk_time - stream_start) * 1000)
+                    result = chunk if result is None else result + chunk
+                if result is None:
+                    result = AIMessage(content="")  # 极端兜底：流未产生任何 chunk，避免后续 NoneType 崩溃
+                # 流式完成日志
+                stream_end = time.time()
+                logger.debug("[Agent-Stream] 流式完成 (agent=%s, chunks=%d, 首chunk=%.0fms, 总耗时=%.0fms)",
+                             agent_type, chunk_count,
+                             (first_chunk_time - stream_start) * 1000 if first_chunk_time else 0,
+                             (stream_end - stream_start) * 1000)
+            else:
+                # 非流式：一次性取完整结果（API 非流式链路），不走 chunk 累积
+                result = await llm_runner.ainvoke(full_messages)
+                chunk_count = 1
         except Exception:
             # 打印完整异常链（含底层连接错误，如 RemoteProtocolError），用于诊断偶发请求失败；不吞异常
             logger.exception("[Agent] LLM 调用失败 (agent=%s)", agent_type)
@@ -503,9 +535,11 @@ def _make_tools_node():
         # 日志：进入工具节点
         messages = state.get("messages", [])
         last_ai = None
-        for msg in reversed(messages):
-            if isinstance(msg, AIMessage) and getattr(msg, 'tool_calls', None):
-                last_ai = msg
+        last_ai_idx = -1
+        for i in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[i], AIMessage) and getattr(messages[i], 'tool_calls', None):
+                last_ai = messages[i]
+                last_ai_idx = i
                 break
         if last_ai:
             tool_names = [tc.get('name', '?') for tc in last_ai.tool_calls]
@@ -513,7 +547,43 @@ def _make_tools_node():
         else:
             logger.warning("[Tools] 进入工具节点, 但未找到 AIMessage(tool_calls)")
 
-        result = tool_node.invoke(state)
+        # ---- 掩码解码：query_policy 的 id_card 若为掩码，用 user_id 重查 structured_store 取明文 ----
+        # 只改本次 invoke 的消息副本，不回写 graph state：history 里保持掩码，明文不被 checkpointer 持久化。
+        invoke_state = state
+        if last_ai is not None and any(tc.get('name') == 'query_policy' for tc in last_ai.tool_calls):
+            try:
+                from src.memory.mask import is_masked
+                from src.memory.reader import resolve_masked_id_card
+                user_id = state.get("user_id", "") or config.get("configurable", {}).get("user_id", "")
+                need_decode = any(
+                    tc.get('name') == 'query_policy' and is_masked((tc.get('args') or {}).get('id_card'))
+                    for tc in last_ai.tool_calls
+                )
+                if need_decode:
+                    new_ai = copy.deepcopy(last_ai)
+                    for tc in new_ai.tool_calls:
+                        if tc.get('name') == 'query_policy':
+                            args = tc.get('args') or {}
+                            if is_masked(args.get('id_card')):
+                                args['id_card'] = resolve_masked_id_card(user_id, args.get('id_card'))
+                    new_messages = list(messages)
+                    new_messages[last_ai_idx] = new_ai
+                    invoke_state = {**state, "messages": new_messages}
+                    logger.info("[Tools] id_card 掩码解码完成 user_id=%s", user_id or "(未登录)")
+            except Exception as e:
+                logger.error("[Tools] id_card 解码异常，按原值执行: %s", e)
+                invoke_state = state
+
+        result = tool_node.invoke(invoke_state)
+
+        # ---- 工具结果兜底掩码：query_policy 结果若含明文身份证（如"查不到"错误回显），遮回掩码再回灌 LLM ----
+        try:
+            from src.memory.mask import mask_sensitive_text
+            for msg in result.get("messages", []):
+                if isinstance(msg, ToolMessage) and getattr(msg, 'name', '') == 'query_policy':
+                    msg.content = mask_sensitive_text(str(msg.content))
+        except Exception as e:
+            logger.error("[Tools] 工具结果掩码异常（不影响主流程）: %s", e)
 
         new_responder = list(state.get("responder_input", []))
 
@@ -626,7 +696,7 @@ def _make_tools_node():
                     }, ensure_ascii=False)
                     break
                 if "未检索到相关保险条款" in content:
-                    # 统计历史 + 当前共多少次空检索结果，允许最多 3 次工具调用，多给 LLM 重试机会
+                    # 统计历史 + 当前共多少次空检索结果：第 1 次空回 agent 重试，第 2 次空即短路直返（最多 2 次工具调用）
                     empty_count = sum(
                         1 for m in messages
                         if isinstance(m, ToolMessage) and "未检索到相关保险条款" in str(m.content)
@@ -635,7 +705,7 @@ def _make_tools_node():
                         1 for m in result.get("messages", [])
                         if isinstance(m, ToolMessage) and "未检索到相关保险条款" in str(m.content)
                     )
-                    if empty_count >= 3:
+                    if empty_count >= 2:
                         direct_response = "很抱歉，我在知识库中没有找到与您问题相关的条款信息，建议您转人工咨询。"
                         break
                     else:

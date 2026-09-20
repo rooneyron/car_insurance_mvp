@@ -56,6 +56,18 @@ if __name__ == "__main__":
     except Exception as e:
         logger.warning("LLM API 预热失败（不影响服务）: %s", e)
 
+    # ---------- 长期记忆：建 PG 语义表 + 实例化 sqlite 结构化存储 ----------
+    try:
+        from src.db import init_db
+        init_db()                       # 幂等：建 documents/semantic_memory 表 + 索引
+    except Exception as e:
+        logger.warning("init_db 失败（不影响服务启动）: %s", e)
+    try:
+        from src.memory import structured_store  # noqa: F401  触发 sqlite 建表
+        logger.info("长期记忆存储就绪")
+    except Exception as e:
+        logger.warning("记忆存储初始化失败（不影响服务）: %s", e)
+
     # ---------- 组装应用 ----------
     app = create_app()
     demo = create_gradio_interface()
@@ -68,5 +80,24 @@ if __name__ == "__main__":
     logger.info("健康检查: http://127.0.0.1:8000/health")
     logger.info("Gradio 界面: http://127.0.0.1:8000/gradio")
     logger.info("=" * 50)
+
+    # ---------- 飞书消息去重：清理 N 天前已处理记录（防重启后重复推送导致重复回复）----------
+    # 与长期记忆共用 data/user_memory.db；失败降级，绝不影响启动。
+    try:
+        from src.memory.dedup_store import cleanup_old_messages
+        cleanup_old_messages(7)
+    except Exception as e:
+        logger.warning("飞书去重记录清理失败（不影响服务）: %s", e)
+
+    # ---------- 飞书机器人：后台 daemon 线程内 in-process 直连核心 ----------
+    # 与 Gradio 一样直接调用 chat_api_async（不走 HTTP/JWT），复用上面已预加载的 graph/RAG/记忆。
+    # 未配置飞书凭证会自动跳过；任何异常都被吞掉，绝不影响 API/Gradio 主服务。
+    try:
+        import feishu_bot
+        # 先启动飞书专用事件循环（解决 asyncio.run 创建/销毁循环导致 httpx 连接池报错）
+        feishu_bot.start_feishu_loop()
+        feishu_bot.start_in_background()
+    except Exception as e:
+        logger.warning("飞书机器人启动失败（不影响 API/Gradio 服务）: %s", e)
 
     uvicorn.run(app, host="0.0.0.0", port=8000)

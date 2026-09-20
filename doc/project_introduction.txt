@@ -11,7 +11,7 @@
 · Gradio 交互界面
 · LangGraph 手写 StateGraph 4 节点编排（router → planner ⇄ tools → responder → END）
 · 3 套 Agent 配置（general/sale/service），动态绑定 System Prompt + 工具集
-· RAG 检索（FAISS + FastEmbed + BGE-Reranker 本地重排）
+· RAG 检索（ParadeDB pgvector + pg_search + FastEmbed + BGE-Reranker 本地重排）
 · 工具层解耦，每个 Agent 独立配置工具集
 
 3. 工作流与路由

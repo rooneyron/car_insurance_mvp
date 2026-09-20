@@ -1,0 +1,46 @@
+# 阿里云生产部署（无 GPU）：走 DashScope qwen3-rerank API，不装 torch/sentence-transformers
+# 用法：docker-compose -f docker-compose.prod.yml up -d
+#
+# 与 docker-compose.yml 的区别：
+#   - build args 改用 requirements-prod.txt（不含 torch，镜像更小）
+#   - USE_LOCAL_RERANK=false（走 API rerank）
+#   - 无 GPU 透传（deploy 块已移除）
+#   - HF 缓存卷已移除（不需要本地模型）
+
+services:
+  app:
+    build:
+      context: .
+      args:
+        REQ_FILE: requirements-prod.txt
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgresql://insurance_user:insurance_pwd123@db:5432/insurance_db
+      - USE_LOCAL_RERANK=false
+      - HF_HUB_DISABLE_XET=1
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: paradedb/paradedb:latest
+    environment:
+      POSTGRES_USER: insurance_user
+      POSTGRES_PASSWORD: insurance_pwd123
+      POSTGRES_DB: insurance_db
+    volumes:
+      - pgdata:/var/lib/postgresql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U insurance_user -d insurance_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

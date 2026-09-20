@@ -21,6 +21,7 @@ data/*.pkl
 data/*.bin
 data/*.log
 data/usage_cache.json
+data/user_memory.db
 
 # 运行日志（端到端调试/分析测试产物，不入库）
 logs/

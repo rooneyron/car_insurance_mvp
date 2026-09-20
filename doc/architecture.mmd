@@ -4,10 +4,11 @@ graph TB
     subgraph 用户层
         A["Gradio 前端<br/>src/gradio_ui.py"]
         B["REST API<br/>POST /chat · src/api.py"]
+        FS["飞书机器人<br/>feishu_bot.py<br/>in-process 直连 chat_api<br/>长连接事件 → interactive 卡片回复"]
     end
 
     subgraph 对话调度层
-        C["chat_api_stream<br/>src/chat.py<br/>输入校验 · Token限额 · 流式终局确认"]
+        C["chat_api_stream / chat_api<br/>src/chat.py<br/>输入校验 · Token限额 · 流式终局确认<br/>对话前同步读取长期记忆注入 prompt"]
     end
 
     subgraph LangGraph StateGraph
@@ -25,7 +26,7 @@ graph TB
     end
 
     subgraph RAG 检索层
-        L["FAISS 向量 + BM25 双路召回<br/>BM25 索引含【险种】【section】前缀"]
+        L["ParadeDB 双路召回<br/>pgvector 向量(HNSW) + pg_search BM25<br/>BM25 索引含【险种】【section】前缀"]
         M["RRF 融合 + BGE-Reranker 本地重排<br/>或 DashScope Rerank · 生产环境"]
     end
 
@@ -34,10 +35,12 @@ graph TB
         O["MemorySaver<br/>对话记忆 · checkpointer<br/>thread_id 隔离"]
         P["SummarizationNode<br/>进图前 update_state 注入历史摘要<br/>2000 token → 500 token"]
         Q["conn_diag 连接诊断<br/>agent 连接异常时 HTTP 诊断<br/>超时/重试/HTTP-DIAG"]
+        MEM["长期记忆 · 双存储<br/>structured_store: sqlite 结构化画像（5字段）<br/>semantic_store: PG 语义向量（embedding 去重）<br/>extractor: LLM 异步提取 · reader: 掩码 prompt 注入<br/>dedup_store: 飞书消息去重（判重/登记分离）"]
     end
 
     A --> C
     B --> C
+    FS -->|"chat_api(session_id, text, user_id)"| C
     C -->|"astream_events"| D
     D -->|"route"| D2
     D -->|"clarify · 直返"| END_NODE
@@ -57,6 +60,8 @@ graph TB
     M ~~~ O
     M ~~~ P
     M ~~~ Q
+    M ~~~ MEM
+    C -.->|"对话后异步提取<br/>spawn_memory_extraction"| MEM
     %% 上述隐形边：把基础设施集群整体压到 RAG 层之下（最底排），
     %% 避免它与 StateGraph 集群同排并置、挤占中部宽度；
     %% 且不再从 E 拉真边到 N/Q（长边会把底排节点拽向两侧、撑宽画布），
