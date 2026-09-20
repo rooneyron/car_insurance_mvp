@@ -12,13 +12,15 @@
 - ✅ 工具调用（查保单、算保费、条款检索 RAG、转人工）
 - ✅ Gradio 交互界面（三栏演示面板）
 - ✅ 飞书机器人 in-process 直连（长连接事件 → chat_api → interactive 卡片回复，异步 handler 秒 ack 防重投）
+- ✅ 飞书语音消息处理（语音下载 → 火山引擎 ASR 转文字 → chat_api → 卡片回复，支持 opus/wav 格式）
 - ✅ JWT Token 访问控制（7 天有效期 + 前端到期展示）
 - ✅ 每日 Token 限额管理
 - ✅ 全链路 trace_id 日志追踪（contextvars + logging Filter 零侵入）
 - ✅ 流式输出终局确认策略（消除多轮工具调用中间文本闪烁）
 - ✅ LLM 连接预热 + httpx 连接池 keep-alive + 超时/重试/连接诊断（conn_diag）
 - ✅ 公网部署（Render）
-- ✅ Docker 容器化支持
+- ✅ Docker 容器化支持（双场景：本地 GPU + 阿里云无 GPU）
+- ✅ 阿里云生产部署（Docker + ParadeDB + DashScope API Rerank）
 
 ## 技术栈
 
@@ -32,7 +34,8 @@
 | 重排序 | BAAI/bge-reranker-base（本地）/ DashScope qwen3-rerank（生产） |
 | 长期记忆 | sqlite（结构化画像）+ ParadeDB（语义向量）+ LLM 异步提取 |
 | 交互界面 | Gradio + 飞书机器人（lark-oapi） |
-| 部署 | Render / Docker |
+| 语音识别 | 火山引擎豆包语音 ASR（录音文件识别极速版，ogg_opus/wav） |
+| 部署 | Render / Docker / 阿里云 ECS |
 
 ## 核心功能
 
@@ -46,6 +49,7 @@
 | Agent 编排 | 手写 StateGraph 4 节点（router/prepare_input/agent/tools），条件边动态调度 |
 | 流式输出 | agent 异步流式直出终答，调工具轮 content 清空、直接回复轮流式推前端 |
 | 飞书机器人 | in-process 直连 chat_api，长连接事件 → interactive 卡片回复，异步 handler 秒 ack 防重投，reply 网络异常退避重试 |
+| 飞书语音消息 | 语音下载 → 火山引擎 ASR 转文字 → chat_api → 卡片回复（顶部显示识别结果），opus 自动 fallback 转 wav（ffmpeg），专用事件循环避免 asyncio.run 连接池冲突 |
 | 访问控制 | JWT Token 认证，7 天有效期，前端展示到期时间 |
 | 检索质量 | 精排阈值过滤（RAG_SCORE_THRESHOLD，默认 0.6）+ 空结果兜底转人工 |
 | 成本控制 | 每日 Token 限额，JSON 日志记录 |
@@ -83,6 +87,7 @@ RAG_SCORE_THRESHOLD=0.6           # RAG 精排阈值，默认 0.6（越高越严
 DAILY_TOKEN_LIMIT=1000000         # 每日 Token 限额，默认 1000000
 FEISHU_APP_ID=cli_xxx             # 飞书应用 App ID（缺失则跳过飞书机器人）
 FEISHU_APP_SECRET=xxx             # 飞书应用 App Secret（缺失则跳过飞书机器人）
+VOLC_ASR_API_KEY=xxx              # 火山引擎 ASR API Key（飞书语音转文字，缺失则语音功能不可用）
 ```
 
 ### 4. 启动 ParadeDB 并初始化 RAG 数据
@@ -122,9 +127,11 @@ python generate_token.py
 ```text
 car_insurance_mvp/
 ├── app.py                      # FastAPI 主入口（启动、预热、路由挂载）
-├── feishu_bot.py               # 飞书机器人（in-process 直连 chat_api，长连接事件 → interactive 卡片回复）
+├── feishu_bot.py               # 飞书机器人（in-process 直连 chat_api，长连接事件 → interactive 卡片回复，语音消息 ASR）
 ├── generate_token.py           # JWT Token 生成脚本
-├── Dockerfile                  # Docker 容器化构建配置
+├── Dockerfile                  # Docker 容器化构建配置（含 ffmpeg + 阿里云 apt 镜像）
+├── docker-compose.yml          # 本地开发 Docker 配置（GPU + 本地 Rerank）
+├── docker-compose.prod.yml     # 阿里云生产 Docker 配置（无 GPU + API Rerank）
 ├── requirements.txt            # 本地开发依赖
 ├── requirements-prod.txt       # 生产环境轻量依赖
 ├── .env                        # 环境变量配置（不提交 Git）
@@ -133,6 +140,7 @@ car_insurance_mvp/
 │   ├── api.py                  #   REST API 路由（JWT 中间件、健康检查）
 │   ├── chat.py                 #   对话调度（流式/同步入口、终局确认策略）
 │   ├── gradio_ui.py            #   Gradio 交互界面（三栏演示面板）
+│   ├── asr.py                  #   火山引擎 ASR 语音识别（录音文件识别极速版，speech_to_text）
 │   ├── rag.py                  #   RAG 检索（ParadeDB pgvector + pg_search + BGE-Reranker）
 │   ├── db.py                   #   ParadeDB 连接与 schema 初始化（get_conn / init_db）
 │   ├── query_expander.py       #   查询扩展（口语化→标准术语，提升 BM25 召回）
@@ -200,7 +208,10 @@ car_insurance_mvp/
 │
 ├── tools/                      # 迁移/运维脚本
 │   ├── __init__.py
-│   └── ingest_to_pg.py         #   一次性灌库：insurance_terms.txt → ParadeDB（128 条）
+│   └── ingest_to_pg.py         #   一次性灌库：data/chunk_metadata.json → ParadeDB（128 条）
+│
+├── test_demo_panel.py          # 自动化演示测试脚本（三栏 10 按钮端到端验证）
+├── test_volc_asr.py            # 火山引擎 ASR 独立测试脚本
 │
 └── config/
     └── config.yaml             #   路由关键词配置
@@ -217,6 +228,7 @@ car_insurance_mvp/
 | RAG 存储迁移 ParadeDB | FAISS+rank_bm25 → pgvector(HNSW)+pg_search(BM25)，检索语义不变；FAISS 栈保留供熔断降级 |
 | 长期记忆双存储 | sqlite 结构化画像（5 字段，本地快查）+ PG 语义向量（事实短句，embedding 去重，相似度 0.85 阈值）；对话后 LLM 异步提取，绝不阻塞主流程 |
 | 飞书 in-process 直连 | feishu_bot.py 与 Gradio 同源 from src.chat import chat_api，不走 HTTP/JWT，复用已加载 graph/RAG/记忆；一条 python app.py 同起 API+Gradio+飞书 |
+| 飞书长期事件循环 | 飞书专用 asyncio 事件循环（start_feishu_loop），所有消息通过 run_coroutine_threadsafe 提交，避免每次 asyncio.run 创建/销毁循环导致 httpx 连接池绑定错误 |
 | 飞书异步 handler | lark SDK 同步调 handler 且 handler 返回后才回写 ack；handler 拆成快速提取+只读判重+submit 线程池秒返回（实测 0ms），chat_api+reply+登记异步跑，避免 ack 超时致飞书重投 |
 | 去重判重/登记分离 | is_duplicate_message 只读 SELECT 不登记；mark_message_processed 仅在 reply 成功后 INSERT OR IGNORE，避免回复失败的消息被误标记、重投跳过致用户永久收不到回复 |
 | JWT + 每日限额 | 访问控制 + 成本管控双重保障 |
@@ -238,4 +250,4 @@ car_insurance_mvp/
 
 项目命名、核心技术难题的解决，均离不开相关技术助力。
 
-2026.09.14
+2026.09.20
