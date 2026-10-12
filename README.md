@@ -21,6 +21,7 @@
 - ✅ 公网部署（Render）
 - ✅ Docker 容器化支持（双场景：本地 GPU + 阿里云无 GPU）
 - ✅ 阿里云生产部署（Docker + ParadeDB + DashScope API Rerank）
+- ✅ 访问计数器（Gradio 页面访问统计，内存计数 + SQLite 持久化）
 
 ## 技术栈
 
@@ -220,6 +221,68 @@ car_insurance_mvp/
     ├── __init__.py
     └── ingest_to_pg.py         #   一次性灌库：data/chunk_metadata.json → ParadeDB（128 条）
 ```
+
+## RAG 检索管线详解
+
+### 数据准备流程
+
+```text
+PDF 条款 ──→ pdf_to_text.py ──→ TXT 文本
+                                    │
+                                    ▼
+                            chunk_clauses.py ──→ 按"条"结构化切块
+                                    │
+                                    ▼
+                            commercial_chunks.json + compulsory_chunks.json
+                                    │
+                                    ▼
+                            chunk_metadata.json（128 条）
+                                    │
+                                    ▼
+                            ingest_to_pg.py ──→ ParadeDB documents 表
+```
+
+### 切块逻辑
+
+- **切分单位**: 以"第X条"为最小单位（非按字数切）
+- **元数据**: `doc_type` / `chapter` / `section` / `article_no` / `insurance_type`
+- **总计**: 128 条 chunk（商业险 + 交强险）
+
+### ParadeDB documents 表结构
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | BIGINT PK | chunk 编号 |
+| content | TEXT | 原始条款文本 |
+| metadata | JSONB | `{doc_type, chapter, section, article_no, insurance_type}` |
+| content_tokens | TEXT | jieba 切词后空格拼接（BM25 索引字段） |
+| source | TEXT | 来源文档类型 |
+| embedding | vector(512) | fastembed (bge-small-zh-v1.5) 向量 |
+| created_at | TIMESTAMPTZ | 创建时间 |
+
+**索引**:
+- HNSW 向量索引: `vector_cosine_ops`（余弦相似度）
+- BM25 索引: pg_search `whitespace` 分词器（底层 Tantivy，精确还原 jieba 切分）
+
+### 查询链路
+
+| 步骤 | 操作 | 参数 |
+|------|------|------|
+| ① 险种识别 | 别名匹配（如"三者"→"三者险"） | - |
+| ② 简称替换 | 简称→全称 | "三者险"→"机动车第三者责任保险" |
+| ③ 查询扩展 | 同义词追加（仅 BM25） | 险种术语×1 + 业务术语×2 |
+| ④ 向量检索 | pgvector HNSW 余弦 | **top_k=50** |
+| ⑤ BM25 检索 | pg_search whitespace | **top_k=50** |
+| ⑥ Metadata 过滤 | 保留匹配险种 + "通用" | - |
+| ⑦ RRF 融合 | Reciprocal Rank Fusion | **K=60**, 输出 **top_k=30** |
+| ⑧ 精排 | CrossEncoder / qwen3-rerank API | **top_k=3** |
+| ⑨ 阈值过滤 | 最高分 < 阈值则返空 | **RAG_SCORE_THRESHOLD=0.6** |
+
+**RRF 公式**: `RRF_score(doc) = Σ 1/(K + rank_i)`，K=60 为标准值
+
+**精排模式**:
+- 本地: `USE_LOCAL_RERANK=true` → BAAI/bge-reranker-base (CrossEncoder)
+- 生产: `USE_LOCAL_RERANK=false` → DashScope qwen3-rerank API
 
 ## 关键决策记录
 

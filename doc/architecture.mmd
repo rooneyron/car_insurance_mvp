@@ -1,69 +1,94 @@
 graph TB
-    END_NODE(("END"))
+    %% 全局样式调整，让子图自带浅色背景，节点紧凑
+    classDef default fill:#f4f4f9,stroke:#666,stroke-width:1.5px,color:#333;
+    classDef endNode fill:#ffcccc,stroke:#cc0000,stroke-width:2px,color:#000;
 
+    END_NODE(("END")):::endNode
+
+    %% ================= 用户层 (水平排列，压缩高度) =================
     subgraph 用户层
+        direction LR
         A["Gradio 前端<br/>src/gradio_ui.py"]
-        B["REST API<br/>POST /chat · src/api.py"]
-        FS["飞书机器人<br/>feishu_bot.py<br/>in-process 直连 chat_api<br/>长连接事件 → interactive 卡片回复"]
+        B["REST API<br/>POST /chat · GET /visits<br/>src/api.py"]
+        FS["飞书机器人<br/>src/feishu/feishu_bot.py"]
     end
 
+    %% ================= 对话调度层 =================
     subgraph 对话调度层
-        C["chat_api_stream / chat_api<br/>src/chat.py<br/>输入校验 · Token限额 · 流式终局确认<br/>对话前同步读取长期记忆注入 prompt"]
+        C["chat_api_stream<br/>src/chat.py<br/>输入校验 · Token限额 · 流式终局确认"]
     end
 
+    %% ================= LangGraph 核心状态机 =================
     subgraph LangGraph StateGraph
-        D["router 节点 · 五层漏斗<br/>src/router/<br/>L0 安全拦截 → DST 逃生承接 →<br/>L1 关键词 → L2 小模型分类 →<br/>L3 大模型复核（sale/service 边界）→ L4 澄清/转人工"]
-        D2["prepare_input 节点<br/>src/chains/chains.py<br/>构建 responder_input（惰性保留待清理）"]
-        E["agent 节点 · 异步流式<br/>src/chains/chains.py<br/>bind_tools 决策 · astream 流式直出<br/>调工具轮清空 content /<br/>直接回复轮 content 即终答"]
-        F["tools 节点<br/>src/chains/chains.py<br/>ToolNode 执行 · 短路检测<br/>转人工/RAG 连续空结果 →<br/>direct_response"]
+        direction TB
+        D["router 节点<br/>src/router/<br/>五层漏斗"]
+        D2["prepare_input 节点<br/>src/chains/chains.py"]
+        E["agent 节点<br/>异步流式 · bind_tools<br/>astream 流式直出"]
+        F["tools 节点<br/>ToolNode · 短路检测<br/>转人工/RAG空结果 → direct_response"]
+        
+        D -->|"route"| D2
+        D2 --> E
+        E -->|"有 tool_calls"| F
+        F -->|"ReAct 循环"| E
     end
 
-    subgraph 工具层
-        H["calculate_premium<br/>保费估算"]
-        I["query_policy<br/>保单查询"]
-        J["search_insurance_terms<br/>条款检索 RAG"]
-        K["transfer_to_human<br/>转人工"]
+    %% ================= 底层：基础设施与工具层 (横向并排，节省纵向空间) =================
+    subgraph 底层模块
+        direction LR
+        
+        subgraph 基础设施
+            direction TB
+            N["LLM 推理<br/>DeepSeek + qwen-turbo"]
+            O["MemorySaver<br/>对话记忆 · thread_id 隔离"]
+            P["SummarizationNode<br/>2000 token → 500 token"]
+            MEM["长期记忆<br/>sqlite结构化 + PG语义向量"]
+            VC["访问计数器<br/>src/visit_counter.py"]
+        end
+        
+        subgraph 工具层
+            direction TB
+            H["calculate_premium<br/>保费估算"]
+            I["query_policy<br/>保单查询"]
+            K["transfer_to_human<br/>转人工"]
+            J["search_insurance_terms<br/>条款检索 RAG"]
+            
+            subgraph RAG检索层
+                direction TB
+                L["ParadeDB 双路召回<br/>pgvector(HNSW) + pg_search(BM25)"]
+                M["RRF融合(K=60) → 精排(top3)<br/>本地: BGE-Reranker · 生产: qwen3-rerank"]
+                L --> M
+            end
+            
+            J --> L
+        end
     end
 
-    subgraph RAG 检索层
-        L["ParadeDB 双路召回<br/>pgvector 向量(HNSW) + pg_search BM25<br/>BM25 索引含【险种】【section】前缀"]
-        M["RRF 融合 + BGE-Reranker 本地重排<br/>或 DashScope Rerank · 生产环境"]
-    end
-
-    subgraph 基础设施
-        N["LLM 推理 · 多模型混合<br/>agent + L3复核 = DeepSeek<br/>L2分类 = 低成本可配模型（qwen-turbo）"]
-        O["MemorySaver<br/>对话记忆 · checkpointer<br/>thread_id 隔离"]
-        P["SummarizationNode<br/>进图前 update_state 注入历史摘要<br/>2000 token → 500 token"]
-        Q["conn_diag 连接诊断<br/>agent 连接异常时 HTTP 诊断<br/>超时/重试/HTTP-DIAG"]
-        MEM["长期记忆 · 双存储<br/>structured_store: sqlite 结构化画像（5字段）<br/>semantic_store: PG 语义向量（embedding 去重）<br/>extractor: LLM 异步提取 · reader: 掩码 prompt 注入<br/>dedup_store: 飞书消息去重（判重/登记分离）"]
-    end
-
+    %% ================= 核心流向连线 =================
+    %% 接入层到调度层
     A --> C
     B --> C
-    FS -->|"chat_api(session_id, text, user_id)"| C
-    C -->|"astream_events"| D
-    D -->|"route"| D2
-    D -->|"clarify · 直返"| END_NODE
-    D -->|"handoff · 直返"| END_NODE
-    D2 -->|"prepare_input → agent"| E
-    E -->|"有 tool_calls"| F
-    E -->|"无 tool_calls · 直出终答"| END_NODE
-    F -->|"短路直返"| END_NODE
-    F -->|"ReAct 循环"| E
+    FS -->|"chat_api"| C
+
+    %% 调度层到状态机
+    C -->|"state.graph.astream_events"| D
+
+    %% 状态机内部到 END 的出口
+    D -->|"clarify/handoff"| END_NODE
+    E -->|"无 tool_calls"| END_NODE
+    F -->|"direct_response 非空 · 短路直返"| END_NODE
+
+    %% 工具节点调用底层工具
     F --> H
     F --> I
     F --> J
     F --> K
-    J --> L
-    L --> M
-    M ~~~ N
-    M ~~~ O
-    M ~~~ P
-    M ~~~ Q
-    M ~~~ MEM
-    C -.->|"对话后异步提取<br/>spawn_memory_extraction"| MEM
-    %% 上述隐形边：把基础设施集群整体压到 RAG 层之下（最底排），
-    %% 避免它与 StateGraph 集群同排并置、挤占中部宽度；
-    %% 且不再从 E 拉真边到 N/Q（长边会把底排节点拽向两侧、撑宽画布），
-    %% 调用语义已写进 N/Q 节点标签。
-    %% 注意：%% 注释不能写在 ~~~ 隐形边之前（mermaid.ink 解析会 400）
+
+    %% 基础设施与上层的关系 (使用虚线，尽量缩短连线路径)
+    E -.-> N
+    D -.-> O
+    D -.-> P
+    C -.->|"异步提取"| MEM
+    
+    %% 访问计数器关系
+    A -.->|"页面加载"| VC
+    B -.->|"GET /visits"| VC
