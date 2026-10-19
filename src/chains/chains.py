@@ -1018,6 +1018,7 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
         api_key=classifier_api_key,
         base_url=classifier_base_url,
         temperature=0.1,
+        max_tokens=128,  # 分类只输出 JSON，不需要太长
         max_retries=0,  # 不重试：429限流时快速失败，让L3(DeepSeek)兜底
         request_timeout=llm_request_timeout,
         http_client=http_client,

@@ -56,8 +56,16 @@ def classify(message: str, llm) -> L2Result:
     prompt = L2_PROMPT.replace("{message}", message)
 
     try:
-        response = llm.invoke(prompt)
-        raw_text = response.content if hasattr(response, "content") else str(response)
+        # 直接用底层 OpenAI 客户端，绕过 LangChain 以正确传递 enable_thinking=False
+        client = llm.client
+        response = client.chat.completions.create(
+            model=llm.model_name,
+            messages=[{"role": "user", "content": prompt}],
+            extra_body={"enable_thinking": False},
+            max_tokens=128,
+            temperature=llm.temperature,
+        )
+        raw_text = response.choices[0].message.content
         logger.debug("[L2] 原始输出: %s", raw_text[:300])
 
         parsed = _parse_json_from_text(raw_text)
