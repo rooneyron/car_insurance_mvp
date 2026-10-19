@@ -68,6 +68,8 @@ class TimingCallbackHandler(BaseCallbackHandler):
 
     def on_chat_model_error(self, error, **kwargs):
         logger.warning("⏱️ LLM 调用出错: %s", error)
+        # 失败时也记录耗时并出栈，避免计时丢失
+        self._pop_llm_end()
 
     # --- on_llm_* (底层回调，ChatOpenAI 内部也会触发，用于兜底) ---
 
@@ -88,6 +90,9 @@ class TimingCallbackHandler(BaseCallbackHandler):
 
     def on_llm_error(self, error, **kwargs):
         logger.warning("⏱️ LLM 调用出错: %s", error)
+        # 失败时也记录耗时并出栈
+        if self._llm_start_stack:
+            self._pop_llm_end()
 
     # ========== 工具调用追踪 ==========
 
