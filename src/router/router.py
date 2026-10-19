@@ -176,24 +176,12 @@ def route_message(
     # 直接按正常 L2 阈值决定 route / L3 / L4。
     if dst_l2_result is not None:
         l2_result = dst_l2_result
-        logger.info("[Router] 复用 DST L2 结果: intent=%s, confidence=%.2f",
-                    l2_result.intent, l2_result.confidence)
+        logger.info("[Router] 复用 DST L2 结果: intent=%s, confidence=%.2f, failed=%s",
+                    l2_result.intent, l2_result.confidence, l2_result.failed)
     
-        need_l3, l3_reason = _needs_l3_review(l2_result, config)
-
-        if l2_result.confidence >= config.l2_accept_threshold and not need_l3:
-            result = RouterResult(
-                intent=l2_result.intent,
-                confidence=l2_result.confidence,
-                source=SOURCE_L2_DST_ESCAPE,
-                sentiment=l2_result.sentiment,
-                action=ACTION_ROUTE,
-            )
-            _log_route(result, message, l1_result, l2_result, clarify_count=router_state.clarify_count)
-            return result
-    
-        if need_l3:
-            logger.info("[Router] DST复用触发 L3 复核: %s", l3_reason)
+        # ---- DST L2 失败兜底：调用 L3 ----
+        if l2_result.failed:
+            logger.info("[Router] DST L2 失败，触发 L3 兜底")
             l3_result = l3_review(message, l2_result, llm_reviewer)
             if l3_result["confidence"] >= config.l3_accept_threshold:
                 result = RouterResult(
@@ -206,8 +194,39 @@ def route_message(
                 _log_route(result, message, l1_result, l2_result, l3_result,
                            clarify_count=router_state.clarify_count)
                 return result
-            # L3 不通过 → fall through to L4
-        # else: L2 低置信度 → fall through to L4
+            # L3 也不通过 → fall through to L4
+            logger.info("[Router] DST L3 兜底也不通过，进入 L4 澄清")
+        else:
+            # ---- L2 成功：正常决策 ----
+            need_l3, l3_reason = _needs_l3_review(l2_result, config)
+
+            if l2_result.confidence >= config.l2_accept_threshold and not need_l3:
+                result = RouterResult(
+                    intent=l2_result.intent,
+                    confidence=l2_result.confidence,
+                    source=SOURCE_L2_DST_ESCAPE,
+                    sentiment=l2_result.sentiment,
+                    action=ACTION_ROUTE,
+                )
+                _log_route(result, message, l1_result, l2_result, clarify_count=router_state.clarify_count)
+                return result
+    
+            if need_l3:
+                logger.info("[Router] DST复用触发 L3 复核: %s", l3_reason)
+                l3_result = l3_review(message, l2_result, llm_reviewer)
+                if l3_result["confidence"] >= config.l3_accept_threshold:
+                    result = RouterResult(
+                        intent=l3_result["intent"],
+                        confidence=l3_result["confidence"],
+                        source=SOURCE_L3,
+                        sentiment=l2_result.sentiment,
+                        action=ACTION_ROUTE,
+                    )
+                    _log_route(result, message, l1_result, l2_result, l3_result,
+                               clarify_count=router_state.clarify_count)
+                    return result
+                # L3 不通过 → fall through to L4
+            # else: L2 低置信度 → fall through to L4
     
         # 进入 L4（复用 DST L2 结果时跳过 L1）
         new_clarify_count = router_state.clarify_count + 1
@@ -263,24 +282,9 @@ def route_message(
     # ===================== L2：小模型主分类 =====================
     l2_result = l2_classify(message, llm_classifier)
 
-    # ---- L2 决策：是否触发 L3 复核 ----
-    need_l3, l3_reason = _needs_l3_review(l2_result, config)
-
-    if l2_result.confidence >= config.l2_accept_threshold and not need_l3:
-        # 高置信度且非 sale↔service 边界犹豫 → 直接接受
-        result = RouterResult(
-            intent=l2_result.intent,
-            confidence=l2_result.confidence,
-            source=SOURCE_L2,
-            sentiment=l2_result.sentiment,
-            action=ACTION_ROUTE,
-        )
-        _log_route(result, message, l1_result, l2_result, clarify_count=router_state.clarify_count)
-        return result
-
-    if need_l3:
-        # 触发 L3 复核（中置信度 OR 高分但 sale↔service 边界犹豫）
-        logger.info("[Router] 触发 L3 复核: %s", l3_reason)
+    # ---- L2 失败兜底：调用 L3 大模型复核（不同模型，如 DeepSeek）----
+    if l2_result.failed:
+        logger.info("[Router] L2 调用失败，触发 L3 兜底")
         l3_result = l3_review(message, l2_result, llm_reviewer)
 
         if l3_result["confidence"] >= config.l3_accept_threshold:
@@ -296,11 +300,50 @@ def route_message(
                        clarify_count=router_state.clarify_count)
             return result
         else:
-            # L3 不通过 → L4
+            # L3 也不通过 → L4
+            logger.info("[Router] L3 兜底也不通过，进入 L4 澄清")
             pass  # fall through to L4
+
+    # ---- L2 成功：正常决策流程 ----
     else:
-        # conf < review_threshold 低置信度 → 直接 L4
-        pass  # fall through to L4
+        # ---- L2 决策：是否触发 L3 复核 ----
+        need_l3, l3_reason = _needs_l3_review(l2_result, config)
+
+        if l2_result.confidence >= config.l2_accept_threshold and not need_l3:
+            # 高置信度且非 sale↔service 边界犹豫 → 直接接受
+            result = RouterResult(
+                intent=l2_result.intent,
+                confidence=l2_result.confidence,
+                source=SOURCE_L2,
+                sentiment=l2_result.sentiment,
+                action=ACTION_ROUTE,
+            )
+            _log_route(result, message, l1_result, l2_result, clarify_count=router_state.clarify_count)
+            return result
+
+        if need_l3:
+            # 触发 L3 复核（中置信度 OR 高分但 sale↔service 边界犹豫）
+            logger.info("[Router] 触发 L3 复核: %s", l3_reason)
+            l3_result = l3_review(message, l2_result, llm_reviewer)
+
+            if l3_result["confidence"] >= config.l3_accept_threshold:
+                # L3 通过 → 接受 L3 结果
+                result = RouterResult(
+                    intent=l3_result["intent"],
+                    confidence=l3_result["confidence"],
+                    source=SOURCE_L3,
+                    sentiment=l2_result.sentiment,
+                    action=ACTION_ROUTE,
+                )
+                _log_route(result, message, l1_result, l2_result, l3_result,
+                           clarify_count=router_state.clarify_count)
+                return result
+            else:
+                # L3 不通过 → L4
+                pass  # fall through to L4
+        else:
+            # conf < review_threshold 低置信度 → 直接 L4
+            pass  # fall through to L4
 
     # ===================== L4：澄清 / 转人工 =====================
     new_clarify_count = router_state.clarify_count + 1

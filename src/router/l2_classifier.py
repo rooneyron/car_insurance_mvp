@@ -108,6 +108,6 @@ def classify(message: str, llm) -> L2Result:
         return result
 
     except Exception:
-        # 打印完整异常链（含底层连接错误），再走 general 兜底（路由层容错，不中断请求）
+        # 打印完整异常链（含底层连接错误），标记 failed=True 让 router 尝试 L3 兜底
         logger.exception("[L2] LLM 调用失败")
-        return L2Result(intent=INTENT_GENERAL, confidence=0.2, sentiment=SENTIMENT_NEUTRAL)
+        return L2Result(intent=INTENT_GENERAL, confidence=0.2, sentiment=SENTIMENT_NEUTRAL, failed=True)

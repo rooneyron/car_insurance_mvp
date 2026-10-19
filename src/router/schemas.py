@@ -37,6 +37,8 @@ class L2Result:
     sentiment: str
     # top2 备选（新 prompt 只输出 intent，不打分）：[{"intent": str}]
     alternatives: List[dict] = field(default_factory=list)
+    # LLM 调用失败标记：True 表示 L2 调用异常（如 429/500），应尝试 L3 兜底
+    failed: bool = False
 
     @property
     def second_intent(self) -> str:
