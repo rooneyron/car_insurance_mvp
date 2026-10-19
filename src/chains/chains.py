@@ -6,6 +6,8 @@ LangGraph StateGraph 多 Agent 编排
 import os
 import json
 import copy
+import threading
+import time
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
@@ -26,12 +28,70 @@ from src.constants import (
 from src.router.prompts import AGENT_SYSTEM_PROMPTS
 from src.logger import get_logger
 from src.route_types import Route
-import time
 
 logger = get_logger(__name__)
 
 # 根据环境变量决定是否使用本地 Rerank
 from src.rag import search_terms, retrieve_candidates
+
+
+# ============================================================
+# 0. LLM 熔断降级（主模型失败时切换到备用模型）
+# ============================================================
+
+class LLMCircuitBreaker:
+    """LLM 熔断器：closed(正常) → open(熔断) → half_open(试探) 状态机。
+
+    主模型连续失败 N 次后熔断，后续请求直接走备用模型；
+    恢复窗口后试探主模型，成功则恢复。
+    """
+    CLOSED, OPEN, HALF_OPEN = "closed", "open", "half_open"
+
+    def __init__(self, failure_threshold: int = 3, recovery_timeout: int = 30):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.state = self.CLOSED
+        self.failure_count = 0
+        self.last_failure_time = 0.0
+        self._lock = threading.Lock()
+
+    def should_use_fallback(self) -> bool:
+        """是否应该使用备用模型。open 态超过恢复窗口后转 half_open 试探主模型。"""
+        with self._lock:
+            if self.state == self.OPEN:
+                if time.time() - self.last_failure_time >= self.recovery_timeout:
+                    self.state = self.HALF_OPEN
+                    logger.info("[LLM熔断器] open→half_open：已过恢复窗口 %ds，试探主模型", self.recovery_timeout)
+                    return False  # half_open 试探主模型
+                return True  # open 态，用备用
+            return False  # CLOSED / HALF_OPEN 用主模型
+
+    def record_success(self):
+        """主模型成功：half_open→closed 恢复。"""
+        with self._lock:
+            if self.state != self.CLOSED:
+                logger.info("[LLM熔断器] %s→closed：主模型恢复正常", self.state)
+            self.state = self.CLOSED
+            self.failure_count = 0
+
+    def record_failure(self):
+        """主模型失败：累加失败计数。"""
+        with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = time.time()
+            if self.state == self.HALF_OPEN:
+                self.state = self.OPEN
+                logger.info("[LLM熔断器] half_open→open：试探失败，重新计时 %ds", self.recovery_timeout)
+            elif self.failure_count >= self.failure_threshold:
+                self.state = self.OPEN
+                logger.warning("[LLM熔断器] closed→open：主模型连续失败 %d 次，切换到备用模型", self.failure_count)
+
+
+# 模块级单例：全局共享 LLM 熔断状态（连续失败 3 次熔断，30s 后试探恢复）
+_llm_circuit_breaker = LLMCircuitBreaker(failure_threshold=3, recovery_timeout=30)
+
+# 备用 LLM 实例（在 init_graph 中初始化）
+_fallback_llm: Optional[ChatOpenAI] = None
 
 
 # ============================================================
@@ -461,34 +521,62 @@ def _make_agent_node(llm):
         # 流式开关：由入口经 config configurable 透传（API 的 stream 字段 / Gradio 流式路径），
         # 默认 True 保持流式行为（兼容未传该字段的调用方）。
         stream_mode = config.get("configurable", {}).get("stream", True)
-        try:
-            llm_runner = llm.bind_tools(tools) if tools else llm
+
+        # ---- 熔断降级：检查是否直接使用备用模型 ----
+        use_fallback = _llm_circuit_breaker.should_use_fallback()
+        if use_fallback:
+            logger.info("[Agent] 熔断器 open，直接使用备用模型 (agent=%s)", agent_type)
+
+        async def _call_llm(target_llm: ChatOpenAI, is_fallback: bool = False) -> tuple:
+            """调用 LLM（流式/非流式），返回 (result, chunk_count, first_chunk_time)"""
+            llm_runner = target_llm.bind_tools(tools) if tools else target_llm
             result = None
             chunk_count = 0
             stream_start = time.time()
             first_chunk_time = None
+            label = "备用模型" if is_fallback else "主模型"
+
             if stream_mode:
                 async for chunk in llm_runner.astream(full_messages):
                     chunk_count += 1
                     if first_chunk_time is None:
                         first_chunk_time = time.time()
-                        logger.debug("[Agent-Stream] 首 chunk 到达 (agent=%s, 等待=%.0fms)",
-                                     agent_type, (first_chunk_time - stream_start) * 1000)
+                        logger.debug("[Agent-Stream] %s 首 chunk 到达 (agent=%s, 等待=%.0fms)",
+                                     label, agent_type, (first_chunk_time - stream_start) * 1000)
                     result = chunk if result is None else result + chunk
                 if result is None:
-                    result = AIMessage(content="")  # 极端兜底：流未产生任何 chunk，避免后续 NoneType 崩溃
-                # 流式完成日志
+                    result = AIMessage(content="")
                 stream_end = time.time()
-                logger.debug("[Agent-Stream] 流式完成 (agent=%s, chunks=%d, 首chunk=%.0fms, 总耗时=%.0fms)",
-                             agent_type, chunk_count,
+                logger.debug("[Agent-Stream] %s 流式完成 (agent=%s, chunks=%d, 首chunk=%.0fms, 总耗时=%.0fms)",
+                             label, agent_type, chunk_count,
                              (first_chunk_time - stream_start) * 1000 if first_chunk_time else 0,
                              (stream_end - stream_start) * 1000)
             else:
-                # 非流式：一次性取完整结果（API 非流式链路），不走 chunk 累积
                 result = await llm_runner.ainvoke(full_messages)
                 chunk_count = 1
+            return result, chunk_count, first_chunk_time
+
+        try:
+            # ---- 根据熔断器状态选择模型 ----
+            if use_fallback and _fallback_llm is not None:
+                result, chunk_count, first_chunk_time = await _call_llm(_fallback_llm, is_fallback=True)
+            else:
+                # 尝试主模型
+                try:
+                    result, chunk_count, first_chunk_time = await _call_llm(llm, is_fallback=False)
+                    # 主模型成功（如果是 half_open 试探，记录成功恢复）
+                    _llm_circuit_breaker.record_success()
+                except Exception as primary_err:
+                    # 主模型失败，记录失败
+                    _llm_circuit_breaker.record_failure()
+                    # 如果有备用模型，尝试降级
+                    if _fallback_llm is not None:
+                        logger.warning("[Agent] 主模型失败，降级到备用模型 (agent=%s): %s", agent_type, primary_err)
+                        result, chunk_count, first_chunk_time = await _call_llm(_fallback_llm, is_fallback=True)
+                    else:
+                        raise
         except Exception:
-            # 打印完整异常链（含底层连接错误，如 RemoteProtocolError），用于诊断偶发请求失败；不吞异常
+            # 主模型和备用模型都失败，或没有备用模型
             logger.exception("[Agent] LLM 调用失败 (agent=%s)", agent_type)
             raise
 
@@ -879,6 +967,25 @@ def init_graph(api_key: Optional[str] = None, model_name: Optional[str] = None):
 
     # 保存 LLM 实例供 RAG 工具使用
     _rag_llm = llm
+
+    # ---------- 创建备用 LLM（熔断降级用）----------
+    global _fallback_llm
+    fallback_model = os.environ.get("FALLBACK_MODEL", "qwen-plus")
+    fallback_api_key = os.environ.get("FALLBACK_API_KEY", os.environ.get("DASHSCOPE_API_KEY", ""))
+    fallback_base_url = os.environ.get("FALLBACK_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+
+    if fallback_api_key:
+        _fallback_llm = ChatOpenAI(
+            model=fallback_model,
+            api_key=fallback_api_key,
+            base_url=fallback_base_url,
+            temperature=0,
+            max_retries=llm_max_retries,
+            request_timeout=llm_request_timeout,
+        )
+        logger.info("备用 LLM 已初始化: %s@%s", fallback_model, fallback_base_url)
+    else:
+        logger.warning("备用 LLM 未配置（缺少 FALLBACK_API_KEY 或 DASHSCOPE_API_KEY），熔断降级不可用")
 
     # ---------- 创建摘要节点 ----------
     summarization_node = _create_summarization_node(llm)
