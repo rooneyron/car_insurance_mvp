@@ -79,7 +79,7 @@ if __name__ == "__main__":
     # ---------- 组装应用 ----------
     app = create_app()
     demo = create_gradio_interface()
-    app = gr.mount_gradio_app(app, demo, path="/gradio", root_path="https://www.rooneyron.cn")
+    app = gr.mount_gradio_app(app, demo, path="/gradio")
 
     logger.info("=" * 50)
     logger.info("车险智能客服 MVP 已启动")
