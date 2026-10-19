@@ -45,9 +45,16 @@ def create_app() -> FastAPI:
     if not access_token_secret:
         raise RuntimeError("环境变量 ACCESS_TOKEN_SECRET 未配置，请在 .env 文件中设置")
 
+    # Token 验证开关：设为 false 时跳过所有 token 校验（开发/演示用）
+    token_auth_enabled = os.environ.get("TOKEN_AUTH_ENABLED", "true").lower() != "false"
+
     # ---------- Token 验证中间件 ----------
     @application.middleware("http")
     async def verify_token(request: Request, call_next):
+        # Token 验证关闭时，直接放行所有请求
+        if not token_auth_enabled:
+            return await call_next(request)
+
         path = request.url.path
 
         # 放行白名单路径（从 constants 读取）
