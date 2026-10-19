@@ -377,4 +377,14 @@ def create_gradio_interface():
                 [msg, chatbot, session_state, msg, send_btn]
             )
 
+        # ============================================================
+        # 页脚：ICP 备案号
+        # ============================================================
+        gr.HTML(
+            '<div style="text-align: center; padding: 20px 0; margin-top: 20px; border-top: 1px solid #e0e0e0; color: #666; font-size: 12px;">'
+            '<a href="https://beian.miit.gov.cn/" target="_blank" style="color: #666; text-decoration: none;">沪ICP备2026051927号-1</a>'
+            '</div>',
+            visible=True
+        )
+
     return demo
